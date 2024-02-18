@@ -17,6 +17,8 @@ from graphics import PathToDraw
 
 NUM_DEMONSTRATIONS = 4
 
+# Would need to stop the plot showing up after training so dont have to click on it
+
 
 class Network(nn.Module):
     def __init__(self):
@@ -42,6 +44,8 @@ class Robot:
         self.goal_state = goal_state
         self.paths_to_draw = []
 
+        self.last_action = "None"
+
         self.policy_network = Network()
         self.optimizer = optim.Adam(
             self.policy_network.parameters(), lr=0.1)  # Initial learning rate
@@ -58,18 +62,31 @@ class Robot:
     def get_next_action_type(self, state, money_remaining):
         # TODO: This informs robot-learning.py what type of operation to perform
         if not self.demo_done:
+            # If the number of demonstrations collected is less than the required number
             if self.num_demonstrations_collected < NUM_DEMONSTRATIONS:
-                return 'demo'
+                # Check if the last action was a demonstration
+                if self.last_action == 'demo':
+                    # If so, the next action should be a reset
+                    self.last_action = 'reset'
+                    return 'reset'
+                else:
+                    # If the last action was not a demonstration (including the initial case or after a reset), perform a demo
+                    self.last_action = 'demo'
+                    return 'demo'
             else:
-                # Once 10 demonstrations are collected, proceed to train the model
+                # Once the required number of demonstrations has been collected, flag it as done
                 self.demo_done = True
                 print("Demonstrations Complete")
-                self.train_on_demonstrations()  # Train the model with collected demonstrations
+                # Proceed to train the model with the collected demonstrations
+                self.train_on_demonstrations()
                 self.model_trained = True
 
+        # After training is complete, or if the model is already trained, proceed to take steps based on the trained model
         if self.model_trained:
             return 'step'
-        return 'step'  # Default to demo if conditions above are not met
+
+        # Fallback, should ideally not reach here
+        return 'step'
 
     def get_next_action_training(self, state, money_remaining):
         # TODO: This returns an action to robot-learning.py, when get_next_action_type() returns 'step'
@@ -152,17 +169,19 @@ class Robot:
             avg_loss = np.mean(epoch_losses)
             training_losses.append(avg_loss)
 
-            # Clear previous plots to avoid overlaying and set logarithmic scale
+            # Update plot without blocking
             self.ax.clear()
             self.ax.plot(training_losses, color='blue')
             self.ax.set(xlabel='Training Epochs', ylabel='Training Loss (log scale)',
                         title='Loss Curve for Policy Training')
-            plt.yscale('log')  # Ensure the y-axis is logarithmic
+            plt.yscale('log')
             plt.draw()
             plt.pause(0.01)
 
-        plt.ioff()  # Turn off interactive mode
-        plt.show()  # Show the final plot
+        # Save the plot to a file
+        plt.savefig('training_loss_curve.png')
+        # Optionally close the figure programmatically if you don't want it to stay open
+        plt.close(self.fig)
 
     def get_action_from_model(self, state):
         self.policy_network.eval()
