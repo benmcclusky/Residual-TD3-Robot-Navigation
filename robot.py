@@ -15,9 +15,8 @@ import constants
 import configuration
 from graphics import PathToDraw
 
-NUM_DEMONSTRATIONS = 4
-
-# Would need to stop the plot showing up after training so dont have to click on it
+NUM_DEMONSTRATIONS = 3
+TRAIN_AFTER_STEPS = 50
 
 
 class Network(nn.Module):
@@ -38,61 +37,91 @@ class Network(nn.Module):
         return output
 
 
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+
+    def push(self, state, action, next_state):
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)  # Expand the buffer if not at capacity
+        self.buffer[self.position] = (state, action, next_state)
+        self.position = (self.position + 1) % self.capacity  # Circular buffer
+
+    def sample(self, batch_size):
+        if len(self.buffer) < batch_size:
+            return None
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        return [self.buffer[idx] for idx in indices]
+
+    def __len__(self):
+        return len(self.buffer)
+
+
 class Robot:
 
     def __init__(self, goal_state):
         self.goal_state = goal_state
         self.paths_to_draw = []
-        self.last_action = "None"
+        self.last_action = "demo"
         self.policy_network = Network()
         self.optimizer = optim.Adam(
             self.policy_network.parameters(), lr=0.1)  # Initial learning rate
         self.criterion = nn.MSELoss()
         self.demonstration_states = []
         self.demonstration_actions = []
-        self.num_demonstrations_collected = 0
-        self.demo_done = False
+
+        self.memory = ReplayBuffer(10000)  # Example size
+        self.demo_counter = 0
+        self.steps_taken = 0
         self.model_trained = False
-        self.fig, self.ax = plt.subplots()
-        self.ax.set(xlabel='Training Epochs', ylabel='Training Loss',
-                    title='Loss Curve for Policy Training')
 
     def get_next_action_type(self, state, money_remaining):
-        # TODO: This informs robot-learning.py what type of operation to perform
+        # Initialize action_type with a default value
+        action_type = 'step'
 
-        # Check if money left is exactly 5, then prioritize resetting
-        if money_remaining == 5:
-            self.last_action = 'reset'
-            print('Reset')
-            return 'reset'
+        if self.demo_counter < NUM_DEMONSTRATIONS:
+            if self.demo_counter == 0:
+                self.demo_counter += 1
+                print(f"Demonstration: {self.demo_counter}")
+                action_type = 'demo'
 
-        if not self.demo_done:
-            # If the number of demonstrations collected is less than the required number
-            if self.num_demonstrations_collected < NUM_DEMONSTRATIONS:
-                # Check if the last action was a demonstration
-                if self.last_action == 'demo':
-                    # If so, the next action should be a reset
-                    self.last_action = 'reset'
-                    print('Reset')
-                    return 'reset'
+            elif self.last_action == 'demo':
+                self.train_model()
+                self.steps_taken = 0
+                action_type = 'step'
+
+            elif self.last_action == 'step':
+                if self.steps_taken == TRAIN_AFTER_STEPS:
+                    self.train_model()
+                    self.steps_taken = 0
+                    action_type = 'reset'
+
                 else:
-                    # If the last action was not a demonstration (including the initial case or after a reset), perform a demo
-                    self.last_action = 'demo'
-                    return 'demo'
+                    self.steps_taken += 1
+                    action_type = 'step'
+
+            elif self.last_action == 'reset':
+                self.demo_counter += 1
+                action_type = 'demo'
+
+        else:
+            if (self.steps_taken == TRAIN_AFTER_STEPS) and (self.steps_taken > 0) and (money_remaining > 7):
+                self.train_model()
+                self.steps_taken = 0
+                action_type = 'reset'
+
             else:
-                # Once the required number of demonstrations has been collected, flag it as done
-                self.demo_done = True
-                print("Demonstrations Complete")
-                # Proceed to train the model with the collected demonstrations
-                self.train_on_demonstrations()
-                self.model_trained = True
+                self.steps_taken += 1
+                action_type = 'step'
 
-        # After training is complete, or if the model is already trained, proceed to take steps based on the trained model
-        if self.model_trained:
-            return 'step'
+        # Debugging output
+        print(f"Action Type: {action_type}, Money Remaining: {money_remaining}, Last Action: {self.last_action}, Steps Taken: {self.steps_taken}, Demonstrations: {self.demo_counter}")
 
-        # Fallback, should ideally not reach here
-        return 'step'
+        self.last_action = action_type
+
+        return action_type
 
     def get_next_action_training(self, state, money_remaining):
         # TODO: This returns an action to robot-learning.py, when get_next_action_type() returns 'step'
@@ -112,7 +141,7 @@ class Robot:
     def process_transition(self, state, action, next_state, money_remaining):
         # TODO: This allows you to process or store a transition that the robot has experienced in the environment
         # Currently, nothing happens
-        pass
+        self.memory.push(state, action, next_state)
 
     # Function that takes in the list of states and actions for a demonstration
     def process_demonstration(self, demonstration_states, demonstration_actions, money_remaining):
@@ -120,13 +149,17 @@ class Robot:
 
         self.demonstration_states.extend(demonstration_states)
         self.demonstration_actions.extend(demonstration_actions)
-        # Increment the counter for each demonstration processed
-        self.num_demonstrations_collected += 1
-        print(f"Demonstration: {self.num_demonstrations_collected}")
 
         path = PathToDraw(demonstration_states, colour=[
                           255, 0, 0], width=2)  # Example color and width
         self.paths_to_draw.append(path)
+
+        for i in range(len(demonstration_states) - 1):  # Assuming sequential data
+            state = demonstration_states[i]
+            action = demonstration_actions[i]
+            # Next state is the subsequent state in the demo
+            next_state = demonstration_states[i + 1]
+            self.memory.push(state, action, next_state)
 
     def dynamics_model(self, state, action):
         # TODO: This is the learned dynamics model, which is currently called by graphics.py when visualising the model
@@ -134,54 +167,63 @@ class Robot:
         next_state = state + action
         return next_state
 
-    def train_on_demonstrations(self):
-        states = np.array(self.demonstration_states, dtype=np.float32)
-        actions = np.array(self.demonstration_actions, dtype=np.float32)
-        network_input_data = torch.tensor(states, dtype=torch.float32)
-        network_label_data = torch.tensor(actions, dtype=torch.float32)
-
-        # Normalize input and output data
-        input_normalisation_factor = torch.max(network_input_data)
-        output_normalisation_factor = torch.max(network_label_data)
-        network_input_data /= input_normalisation_factor
-        network_label_data /= output_normalisation_factor
+    def train_model(self):
+        if len(self.memory) == 0:
+            print("Memory buffer is empty. Cannot train model.")
+            return
 
         num_epochs = 100
         minibatch_size = 100
-        training_losses = []
+
+        # Extract all states and actions from the memory for normalization factor calculation
+        all_transitions = self.memory.buffer
+        all_states = np.array(
+            [trans[0] for trans in all_transitions if trans is not None], dtype=np.float32)
+        all_actions = np.array(
+            [trans[1] for trans in all_transitions if trans is not None], dtype=np.float32)
+
+        # Calculate normalization factors
+        input_normalisation_factor = np.max(
+            np.abs(all_states)) if np.max(np.abs(all_states)) > 0 else 1
+        output_normalisation_factor = np.max(
+            np.abs(all_actions)) if np.max(np.abs(all_actions)) > 0 else 1
 
         for epoch in range(num_epochs):
-            permutation = torch.randperm(network_input_data.size()[0])
             epoch_losses = []
 
-            for i in range(0, network_input_data.size()[0], minibatch_size):
-                indices = permutation[i:i + minibatch_size]
-                batch_x, batch_y = network_input_data[indices], network_label_data[indices]
+            for _ in range(len(self.memory) // minibatch_size):
+                transitions = self.memory.sample(minibatch_size)
+                if transitions is None:
+                    print("Not enough transitions to sample a minibatch.")
+                    break
+
+                batch = list(zip(*transitions))
+                states = np.array(batch[0], dtype=np.float32)
+                actions = np.array(batch[1], dtype=np.float32)
+                next_states = np.array(batch[2], dtype=np.float32)
+
+                # Normalize data
+                states = torch.tensor(
+                    states, dtype=torch.float32) / input_normalisation_factor
+                actions = torch.tensor(
+                    actions, dtype=torch.float32) / output_normalisation_factor
+                next_states = torch.tensor(
+                    next_states, dtype=torch.float32) / input_normalisation_factor
 
                 self.optimizer.zero_grad()
-                outputs = self.policy_network(batch_x)
-                loss = self.criterion(outputs, batch_y)
+                outputs = self.policy_network(states)
+                loss = self.criterion(outputs, actions)
                 loss.backward()
                 self.optimizer.step()
 
                 epoch_losses.append(loss.item())
 
-            avg_loss = np.mean(epoch_losses)
-            training_losses.append(avg_loss)
+            if len(epoch_losses) > 0:
+                avg_loss = np.mean(epoch_losses)
+                print(f"Epoch {epoch}, Average Loss: {avg_loss}")
 
-            # Update plot every 10 epochs without blocking
-            if epoch % 10 == 0:
-                self.ax.clear()
-                self.ax.plot(training_losses, color='blue')
-                self.ax.set(xlabel='Training Epochs', ylabel='Training Loss (log scale)',
-                            title='Loss Curve for Policy Training')
-                plt.yscale('log')
-                plt.draw()
-                plt.pause(0.01)
-
-        # Save the plot to a file at the end of training
-        plt.savefig('training_loss_curve.png')
-        plt.close(self.fig)  # Close the figure programmatically
+        self.model_trained = True
+        print("Training completed.")
 
     def get_action_from_model(self, state):
         self.policy_network.eval()

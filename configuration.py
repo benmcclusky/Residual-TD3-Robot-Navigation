@@ -18,7 +18,9 @@ WINDOW_SIZE = 550
 GRAPHICS_ON = True
 
 # The action that is visualised in the "Model Visualisation" window
-MODEL_VISUALISATION_ACTION = [0.5 * constants.ROBOT_MAX_ACTION, 0.5 * constants.ROBOT_MAX_ACTION]
+MODEL_VISUALISATION_ACTION = [
+    0.5 * constants.ROBOT_MAX_ACTION, 0.5 * constants.ROBOT_MAX_ACTION]
 
 # The random seed used for all random numbers, if you want to study specific environments
-RANDOM_SEED = int(time.time())
+# RANDOM_SEED = int(time.time())
+RANDOM_SEED = 1707366464
