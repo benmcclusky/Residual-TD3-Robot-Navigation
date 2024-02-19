@@ -43,9 +43,7 @@ class Robot:
     def __init__(self, goal_state):
         self.goal_state = goal_state
         self.paths_to_draw = []
-
         self.last_action = "None"
-
         self.policy_network = Network()
         self.optimizer = optim.Adam(
             self.policy_network.parameters(), lr=0.1)  # Initial learning rate
@@ -61,6 +59,13 @@ class Robot:
 
     def get_next_action_type(self, state, money_remaining):
         # TODO: This informs robot-learning.py what type of operation to perform
+
+        # Check if money left is exactly 5, then prioritize resetting
+        if money_remaining == 5:
+            self.last_action = 'reset'
+            print('Reset')
+            return 'reset'
+
         if not self.demo_done:
             # If the number of demonstrations collected is less than the required number
             if self.num_demonstrations_collected < NUM_DEMONSTRATIONS:
@@ -68,6 +73,7 @@ class Robot:
                 if self.last_action == 'demo':
                     # If so, the next action should be a reset
                     self.last_action = 'reset'
+                    print('Reset')
                     return 'reset'
                 else:
                     # If the last action was not a demonstration (including the initial case or after a reset), perform a demo
@@ -133,6 +139,8 @@ class Robot:
         actions = np.array(self.demonstration_actions, dtype=np.float32)
         network_input_data = torch.tensor(states, dtype=torch.float32)
         network_label_data = torch.tensor(actions, dtype=torch.float32)
+
+        # Normalize input and output data
         input_normalisation_factor = torch.max(network_input_data)
         output_normalisation_factor = torch.max(network_label_data)
         network_input_data /= input_normalisation_factor
@@ -140,17 +148,9 @@ class Robot:
 
         num_epochs = 100
         minibatch_size = 100
-        num_minibatches = len(network_input_data) // minibatch_size
         training_losses = []
 
         for epoch in range(num_epochs):
-            if epoch == 20:
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = 0.01
-            elif epoch == 100:
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = 0.001
-
             permutation = torch.randperm(network_input_data.size()[0])
             epoch_losses = []
 
@@ -169,19 +169,19 @@ class Robot:
             avg_loss = np.mean(epoch_losses)
             training_losses.append(avg_loss)
 
-            # Update plot without blocking
-            self.ax.clear()
-            self.ax.plot(training_losses, color='blue')
-            self.ax.set(xlabel='Training Epochs', ylabel='Training Loss (log scale)',
-                        title='Loss Curve for Policy Training')
-            plt.yscale('log')
-            plt.draw()
-            plt.pause(0.01)
+            # Update plot every 10 epochs without blocking
+            if epoch % 10 == 0:
+                self.ax.clear()
+                self.ax.plot(training_losses, color='blue')
+                self.ax.set(xlabel='Training Epochs', ylabel='Training Loss (log scale)',
+                            title='Loss Curve for Policy Training')
+                plt.yscale('log')
+                plt.draw()
+                plt.pause(0.01)
 
-        # Save the plot to a file
+        # Save the plot to a file at the end of training
         plt.savefig('training_loss_curve.png')
-        # Optionally close the figure programmatically if you don't want it to stay open
-        plt.close(self.fig)
+        plt.close(self.fig)  # Close the figure programmatically
 
     def get_action_from_model(self, state):
         self.policy_network.eval()
