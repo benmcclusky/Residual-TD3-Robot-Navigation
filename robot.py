@@ -188,7 +188,7 @@ class Robot:
         action = self.planned_actions[self.plan_index]  # Assume self.planned_actions is updated to hold only the next action or sequence
         self.plan_index += 1  # Reset plan_index as we will replan after this action
 
-        action = self.add_noise(action)
+        # action = self.add_noise(action)
 
         return action
     
