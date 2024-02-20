@@ -16,11 +16,11 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 1
+NUM_DEMO = 3
 
 # Random Exploration
-NUM_EXPLORATION = 5
-RANDOM_PATH_LENGTH = 50
+NUM_EXPLORATION = 1
+RANDOM_PATH_LENGTH = 20
 
 # Cross-entropy method
 CEM_NUM_PATHS = 30
@@ -38,12 +38,23 @@ class Policy_Network(nn.Module):
         self.layer_3 = nn.Linear(in_features=50, out_features=50)
         self.output_layer = nn.Linear(in_features=50, out_features=2)
 
+        # Apply custom weight initialization
+        self.apply(self.init_weights)
+
     def forward(self, input):
         layer_1_output = nn.functional.relu(self.layer_1(input))
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_3_output)
         return output
+    
+    def init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # He initialization for the weights
+            nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
+            # Zero initialization for the biases
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
     
 
 class Dynamics_Network(torch.nn.Module):
@@ -133,10 +144,10 @@ class Robot:
             self.dynamics_model_network.parameters(), lr=0.01)
         
         self.state_mean = np.array([50.0, 50.0])  
-        self.state_std = np.array([0.5, 0.5]) 
+        self.state_std = np.array([29, 29]) 
 
         self.action_mean = np.array([0.0, 0.0])  
-        self.action_std = np.array([0.5, 0.5])  
+        self.action_std = np.array([2.5, 2.5])  
         
   
     def get_next_action_type(self, state, money_remaining):
@@ -149,6 +160,7 @@ class Robot:
 
         if NUM_EXPLORATION <= self.num_episodes < (NUM_EXPLORATION + NUM_DEMO) and not self.demo_flag:
             self.demo_flag = True
+            self.num_episodes += 1
             action_type = 'demo'
 
         if (self.num_episodes >= (NUM_EXPLORATION + NUM_DEMO)) and not self.planning_flag:
@@ -199,16 +211,17 @@ class Robot:
     def process_transition(self, state, action, next_state, money_remaining):
         self.memory.push(state, action, next_state)
 
+        if not self.exploring_flag:
+            self.demonstration_states.append(state.flatten())
+            self.demonstration_actions.append(action.flatten())
+
     # Function that takes in the list of states and actions for a demonstration
     def process_demonstration(self, demonstration_states, demonstration_actions, money_remaining):
 
         self.demonstration_states.extend(demonstration_states)
         self.demonstration_actions.extend(demonstration_actions)
 
-        # self.draw_path(self.demonstration_states, [0, 255, 0], 2)
-        path = PathToDraw(demonstration_states, colour=[
-                          255, 0, 0], width=2)  # Example color and width
-        self.paths_to_draw.append(path)
+        self.draw_path(demonstration_states, [0, 255, 0], 2)
 
         for i in range(len(demonstration_states) - 1):  # Assuming sequential data
             state = demonstration_states[i]
@@ -232,7 +245,6 @@ class Robot:
 
         # Unnormalize the predicted next state
         predicted_next_state = self.unnormalize(predicted_next_state_normalized, self.state_mean, self.state_std)
-        # predicted_next_state = predicted_next_state_normalized
 
         return predicted_next_state.reshape(-1, 1)
 
@@ -252,7 +264,7 @@ class Robot:
 
         if len(state_array) < 1:
             return
-
+        
         # Normalize demonstration states and actions
         state_array_normalized = self.normalize(state_array, self.state_mean, self.state_std)
         action_array_normalized = self.normalize(action_array, self.action_mean, self.action_std)
@@ -302,7 +314,10 @@ class Robot:
             # Convert to numpy array and remove batch dimension
             action_np = action.numpy().squeeze()
 
-        return action_np
+            # Unnormalize the action
+            unnorm_action = self.unnormalize(action_np, self.action_mean, self.action_std)
+
+        return unnorm_action
     
 
     def random_exploration(self):
@@ -378,7 +393,7 @@ class Robot:
             for _ in range(num_minibatches):
                 transitions = self.memory.sample(minibatch_size)
                 if transitions is None:
-                    continue
+                    return
 
                 state_batch = np.array([t[0].flatten() for t in transitions])
                 action_batch = np.array([t[1].flatten() for t in transitions])
