@@ -51,14 +51,10 @@ class Policy_Network(nn.Module):
 class Dynamics_Network(torch.nn.Module):
     def __init__(self):
         super(Dynamics_Network, self).__init__()
-        self.layer_1 = torch.nn.Linear(
-            in_features=4, out_features=50, dtype=torch.float32)
-        self.layer_2 = torch.nn.Linear(
-            in_features=50, out_features=50, dtype=torch.float32)
-        self.layer_3 = torch.nn.Linear(
-            in_features=50, out_features=50, dtype=torch.float32)
-        self.output_layer = torch.nn.Linear(
-            in_features=50, out_features=2, dtype=torch.float32)
+        self.layer_1 = torch.nn.Linear(in_features=4, out_features=50, dtype=torch.float32)
+        self.layer_2 = torch.nn.Linear(in_features=50, out_features=50, dtype=torch.float32)
+        self.layer_3 = torch.nn.Linear(in_features=50, out_features=50, dtype=torch.float32)
+        self.output_layer = torch.nn.Linear(in_features=50, out_features=2, dtype=torch.float32)
         
         # Apply custom weight initialization
         self.apply(self.init_weights)
@@ -71,16 +67,12 @@ class Dynamics_Network(torch.nn.Module):
         return output
 
     def init_weights(self, m):
-        if type(m) == nn.Linear:
-            # Initialize weights using a uniform distribution and then clip them
-            torch.nn.init.uniform_(m.weight, -1, 1)
-            # Clip the weights to the desired range
-            with torch.no_grad(): # Ensure no gradients are computed for this operation
-                m.weight.clamp_(-constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
-                
-            # Initialize biases to zero
+        if isinstance(m, nn.Linear):
+            # He initialization for the weights
+            nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
+            # Zero initialization for the biases
             if m.bias is not None:
-                torch.nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.bias, 0)
 
 
 
@@ -140,7 +132,10 @@ class Robot:
         self.plan_index = 0
         self.dynamics_model_network = Dynamics_Network()
         self.optimiser = torch.optim.Adam(
-            self.dynamics_model_network.parameters(), lr=0.01)
+            self.dynamics_model_network.parameters(), lr=0.05)
+        
+  
+
 
 
 
@@ -159,7 +154,7 @@ class Robot:
 
         if (self.num_episodes >= (NUM_EXPLORATION + NUM_DEMO)) and not self.planning_flag:
             self.planning_flag = True
-            self.cross_entropy_method_planning()
+            self.cross_entropy_method_planning(state)
 
         if self.plan_index == len(self.planned_actions):
             self.plan_index = 0
@@ -225,22 +220,23 @@ class Robot:
 
 
     def dynamics_model(self, state, action):
-        # TODO: This is the learned dynamics model, which is currently called by graphics.py when visualising the model
-        
         with torch.no_grad():  # Ensure no gradients are computed
-        # Flatten and combine: state and action from (2, 1) each to combined (4,)
+
+            # Flatten and combine: normalized state and action
             combined_input = np.hstack([state.flatten(), action.flatten()])
 
             # Convert to tensor and add batch dimension: from (4,) to (1, 4)
             combined_input_tensor = torch.tensor(combined_input, dtype=torch.float32).unsqueeze(0)
 
             # Neural network prediction: output shape from (1, 4) to (1, 2)
-            predicted_next_state_tensor = self.dynamics_model_network(combined_input_tensor)
+            predicted_next_state = self.dynamics_model_network(combined_input_tensor)
 
-            # Convert to numpy and reshape: from (1, 2) back to (2, 1)
-            predicted_next_state = predicted_next_state_tensor.numpy().reshape(-1, 1)
+            # Convert to numpy
+            predicted_next_state = predicted_next_state.numpy()
 
-        return predicted_next_state
+
+        return predicted_next_state.reshape(-1, 1)  # Reshape if necessary
+
 
     
     # Function to calculate the reward for a path, in order to evaluate how good the path is
@@ -252,15 +248,6 @@ class Robot:
 
         num_epochs = 100
         minibatch_size = 100
-
-        # Extract all states and actions from the memory for normalization factor calculation
-        all_transitions = self.memory.buffer
-        all_states = np.array([trans[0].reshape(-1) for trans in all_transitions if trans is not None], dtype=np.float32)
-        all_actions = np.array([trans[1].reshape(-1) for trans in all_transitions if trans is not None], dtype=np.float32)
-
-        # Calculate normalization factors
-        input_normalisation_factor = np.max(np.abs(all_states)) if np.max(np.abs(all_states)) > 0 else 1
-        output_normalisation_factor = np.max(np.abs(all_actions)) if np.max(np.abs(all_actions)) > 0 else 1
 
         for epoch in range(num_epochs):
             epoch_losses = []
@@ -276,9 +263,9 @@ class Robot:
                 next_state_batch = np.array([t[2].reshape(-1) for t in transitions], dtype=np.float32)
 
                 # Normalize data
-                states = torch.tensor(state_batch / input_normalisation_factor, dtype=torch.float32)
-                actions = torch.tensor(action_batch / output_normalisation_factor, dtype=torch.float32)
-                next_states = torch.tensor(next_state_batch / input_normalisation_factor, dtype=torch.float32)
+                states = torch.tensor(state_batch, dtype=torch.float32)
+                actions = torch.tensor(action_batch, dtype=torch.float32)
+                next_states = torch.tensor(next_state_batch, dtype=torch.float32)
 
                 self.optimizer.zero_grad()
                 outputs = self.policy_network(states)
@@ -363,8 +350,9 @@ class Robot:
         path_to_draw = PathToDraw(path, colour=colour, width=width)  
         self.paths_to_draw.append(path_to_draw)
 
-    
+
     def train_dynamics(self):
+
         num_training_epochs = 0
         training_losses = []
         num_epochs = 100
@@ -411,3 +399,5 @@ class Robot:
                 print(f'Dynamics Network: Epoch {num_training_epochs}: Training Loss = {training_epoch_loss:.4f}')
 
         print("Dynamics Network: Training completed.")
+
+
