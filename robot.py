@@ -17,10 +17,10 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 3
+NUM_DEMO = 2
 
 # Residual Actor Critic 
-PATH_LENGTH = 100
+PATH_LENGTH = 200
 
 BASELINE_LR = 0.01
 BASELINE_EPOCHS = 100
@@ -34,8 +34,11 @@ DDPG_BATCH_SIZE = 100
 GAMMA = 0.99
 TAU = 0.001
 
-INITIAL_NOISE = 0.1  # Initial noise scale
+INITIAL_NOISE = 0.2  # Initial noise scale
 NOISE_DECAY = 0.5  # Decay rate for noise
+
+STUCK_THRESHOLD = 0.2
+STUCK_STEPS = 10
 
 
 class Baseline_Policy_Network(nn.Module):
@@ -54,8 +57,6 @@ class Baseline_Policy_Network(nn.Module):
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_3_output)
-        # Scale output with tanh to fit the action range, then scale to action bounds
-        output = torch.tanh(output) * constants.ROBOT_MAX_ACTION
         return output
     
     def init_weights(self, m):
@@ -83,8 +84,6 @@ class Residual_Actor_Network(nn.Module):
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_3_output)
-        # Scale output with tanh to fit the action range, then scale to action bounds
-        output = torch.tanh(output) * constants.ROBOT_MAX_ACTION
         return output
     
     def init_weights(self, m):
@@ -192,6 +191,12 @@ class Robot:
         self.actor_losses = []
         self.critic_losses = []
 
+        # Add these two lines to the __init__ method
+        self.previous_states = []  # To track previous states
+        self.state_threshold = STUCK_THRESHOLD  # Set a threshold value for state change
+        self.state_change_steps = STUCK_STEPS  # The number of steps to check for state change
+
+
 
   
     def get_next_action_type(self, state, money_remaining):
@@ -221,10 +226,35 @@ class Robot:
         else:
             self.plan_index += 1 
 
+        if self.check_if_stuck(state):
+            print('Stuck')
+            self.plan_index = 0
+            action_type = 'reset'
+
         # Debugging output
         print(f"Action Type: {action_type}, Money Remaining: {money_remaining}, Steps Taken: {self.plan_index}, Episode: {self.num_episodes}")
 
         return action_type
+
+
+    def check_if_stuck(self, state):
+
+        stuck = False
+
+        # Check if state has not changed significantly for a certain number of steps
+        if len(self.previous_states) >= self.state_change_steps:
+            if all(np.linalg.norm(np.array(state) - np.array(prev_state)) < self.state_threshold for prev_state in self.previous_states[-self.state_change_steps:]):
+                stuck = True
+                self.previous_states.clear()  # Clear the state history after reset
+            else:
+                self.previous_states.pop(0)  # Remove the oldest state if not resetting
+
+        # Add the current state to the tracking list
+        self.previous_states.append(state)
+
+        return stuck
+
+
 
     def get_next_action_training(self, state, money_remaining):
         baseline_action = self.get_action_from_model(state)
