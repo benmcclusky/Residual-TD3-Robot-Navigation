@@ -39,6 +39,8 @@ class Baseline_Policy_Network(nn.Module):
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_3_output)
+        # Scale output with tanh to fit the action range, then scale to action bounds
+        output = torch.tanh(output) * constants.ROBOT_MAX_ACTION
         return output
     
     def init_weights(self, m):
@@ -66,6 +68,8 @@ class Residual_Actor_Network(nn.Module):
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_3_output)
+        # Scale output with tanh to fit the action range, then scale to action bounds
+        output = torch.tanh(output) * constants.ROBOT_MAX_ACTION
         return output
     
     def init_weights(self, m):
@@ -138,7 +142,7 @@ class Robot:
 
         # Behavioural Cloning
         self.baseline_network = Baseline_Policy_Network()
-        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=0.1)  # Initial learning rate
+        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=0.001)  # Initial learning rate
         self.criterion = nn.MSELoss()
         self.demonstration_states = []
         self.demonstration_actions = []
@@ -161,8 +165,8 @@ class Robot:
         # Residual Actor / Critic
         self.residual_actor_network = Residual_Actor_Network()
         self.residual_critic_network = Residual_Critic_Network()
-        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=0.1) 
-        self.critic_optimizer = optim.Adam(self.residual_critic_network.parameters(), lr=0.1)  
+        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=0.001) 
+        self.critic_optimizer = optim.Adam(self.residual_critic_network.parameters(), lr=0.001)  
 
         self.target_actor = copy.deepcopy(self.residual_actor_network)
         self.target_critic = copy.deepcopy(self.residual_critic_network)
@@ -198,7 +202,11 @@ class Robot:
         baseline_action = self.get_action_from_model(state)
         corrected_action = self.residual_action(baseline_action)
         noisy_action = self.add_noise(corrected_action)
-        return noisy_action
+        final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
+
+        print(f'Baseline: {baseline_action}, Residual: {corrected_action}, Noisey: {noisy_action}, Final {final_action}')
+
+        return final_action
     
     def residual_action(self, state):
         # Assuming state is a numpy array and needs to be unsqueezed to simulate batch dimension
@@ -206,23 +214,35 @@ class Robot:
         self.residual_actor_network.eval()  # Set the network to evaluation mode
         with torch.no_grad():  # Ensure no gradients are computed
             residual_action = self.residual_actor_network(state_tensor)
-        return residual_action.squeeze(0).numpy()  # Remove batch dimension and convert to numpy
+
+        residual_action_np = residual_action.squeeze(0).numpy()
+
+        return residual_action_np
 
     
     def add_noise(self, action):
-        # Add some noise to the action if the amount of exploration is still small
-        if self.num_episodes < 6:
-            noise = np.random.normal(action, 0.5 * constants.ROBOT_MAX_ACTION)
-        elif self.num_episodes < 20:
-            noise = np.random.normal(action, 0.2 * constants.ROBOT_MAX_ACTION)
+        # Convert action to NumPy array if it's a tensor
+        if isinstance(action, torch.Tensor):
+            action = action.numpy()
+        
+        # Determine the scale of the noise based on the episode number
+        noise_scale = 0.2 if self.num_episodes < 6 else 0.05
+        
+        # Generate noise
+        noise = np.random.normal(0, noise_scale * constants.ROBOT_MAX_ACTION, size=action.shape)
+        
+        # Add noise to the action
+        noisy_action = action + noise
+        
+        return noisy_action
 
-        action += noise
-
-        return action
 
 
     def get_next_action_testing(self, state):
-        return self.get_action_from_model(state)
+        baseline_action = self.get_action_from_model(state)
+        corrected_action = self.residual_action(baseline_action)
+        noisy_action = self.add_noise(corrected_action)
+        return noisy_action
 
     # Function that processes a transition
     def process_transition(self, state, action, next_state, money_remaining):
@@ -271,7 +291,7 @@ class Robot:
         
         # Normalize demonstration states and actions
         state_array_normalized = self.normalize(state_array, self.state_mean, self.state_std)
-        action_array_normalized = self.normalize(action_array, self.action_mean, self.action_std)
+        # action_array_normalized = self.normalize(action_array, self.action_mean, self.action_std)
 
         for epoch in range(num_epochs):
             epoch_losses = []
@@ -283,7 +303,7 @@ class Robot:
                 end_idx = min((batch_idx + 1) * minibatch_size, num_samples)
 
                 states = torch.tensor(state_array_normalized[start_idx:end_idx], dtype=torch.float32)
-                actions = torch.tensor(action_array_normalized[start_idx:end_idx], dtype=torch.float32)
+                actions = torch.tensor(action_array[start_idx:end_idx], dtype=torch.float32)
 
                 self.optimizer.zero_grad()
                 outputs = self.baseline_network(states)
@@ -316,10 +336,7 @@ class Robot:
             # Convert to numpy array and remove batch dimension
             action_np = action.numpy().squeeze()
 
-            # Unnormalize the action
-            unnorm_action = self.unnormalize(action_np, self.action_mean, self.action_std)
-
-        return unnorm_action
+        return action_np
     
 
     def draw_path(self, path, colour, width):
@@ -351,9 +368,9 @@ class Robot:
         # Convert to tensors
         states = torch.FloatTensor(states)
         actions = torch.FloatTensor(actions)
-        rewards = torch.FloatTensor(rewards)
+        rewards = torch.FloatTensor(rewards).unsqueeze(1)
         next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(1 - dones)  # 1 for not done, 0 for done
+        dones = torch.FloatTensor(1 - dones).unsqueeze(1)  # 1 for not done, 0 for done
         
         # Compute the target Q value
         with torch.no_grad():
