@@ -20,7 +20,22 @@ from graphics import PathToDraw
 NUM_DEMO = 3
 
 # Residual Actor Critic 
-PATH_LENGTH = 50
+PATH_LENGTH = 100
+
+BASELINE_LR = 0.01
+BASELINE_EPOCHS = 100
+BASELINE_BATCH = 100
+
+ACTOR_LR = 0.02
+CRITIC_LR = 0.01
+
+DDPG_EPOCHS = 100
+DDPG_BATCH_SIZE = 100
+GAMMA = 0.99
+TAU = 0.001
+
+INITIAL_NOISE = 0.1  # Initial noise scale
+NOISE_DECAY = 0.5  # Decay rate for noise
 
 
 class Baseline_Policy_Network(nn.Module):
@@ -142,13 +157,14 @@ class Robot:
 
         # Behavioural Cloning
         self.baseline_network = Baseline_Policy_Network()
-        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=0.001)  # Initial learning rate
+        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=BASELINE_LR)  # Initial learning rate
         self.criterion = nn.MSELoss()
         self.demonstration_states = []
         self.demonstration_actions = []
 
         self.demo_flag = False
         self.num_episodes = 0
+        self.current_noise_scale = INITIAL_NOISE
 
         # Replay buffer
         self.memory = ReplayBuffer(10000)  # Example size
@@ -165,29 +181,41 @@ class Robot:
         # Residual Actor / Critic
         self.residual_actor_network = Residual_Actor_Network()
         self.residual_critic_network = Residual_Critic_Network()
-        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=0.001) 
-        self.critic_optimizer = optim.Adam(self.residual_critic_network.parameters(), lr=0.001)  
+        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=ACTOR_LR) 
+        self.critic_optimizer = optim.Adam(self.residual_critic_network.parameters(), lr=CRITIC_LR) 
 
         self.target_actor = copy.deepcopy(self.residual_actor_network)
         self.target_critic = copy.deepcopy(self.residual_critic_network)
-        
+
+         # Initialize lists to track losses
+        self.baseline_losses = []
+        self.actor_losses = []
+        self.critic_losses = []
+
+
   
     def get_next_action_type(self, state, money_remaining):
         # Initialize action_type with a default value
         action_type = 'step'
+        print(state)
 
-        if (self.num_episodes < NUM_DEMO) and not self.demo_flag:
+        if (self.num_episodes <= NUM_DEMO) and not self.demo_flag:
+            self.num_episodes += 1
+            action_type = 'demo'
+
+        if (self.num_episodes > NUM_DEMO) and not self.demo_flag:
             self.demo_flag = True
             self.num_episodes += 1
-            self.train_policy()
-            action_type = 'demo'
+            self.train_policy(num_epochs = BASELINE_EPOCHS, minibatch_size = BASELINE_BATCH)
+            action_type = 'reset'
 
         if self.plan_index == (PATH_LENGTH - 1):
             self.plan_index = 0
             self.num_episodes += 1
             self.demo_flag = False
-            self.train_policy()
-            self.ddpg_update(batch_size=16)
+            self.current_noise_scale *= NOISE_DECAY
+            # self.train_policy(num_epochs = BASELINE_EPOCHS, minibatch_size = BASELINE_BATCH)
+            self.ddpg_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
             action_type = 'reset'
 
         else:
@@ -200,13 +228,34 @@ class Robot:
 
     def get_next_action_training(self, state, money_remaining):
         baseline_action = self.get_action_from_model(state)
-        corrected_action = self.residual_action(baseline_action)
-        noisy_action = self.add_noise(corrected_action)
+        residual_action = self.residual_action(baseline_action)
+        corrected_action = baseline_action + residual_action
+        noise = self.generate_noise(corrected_action)
+        noisy_action = corrected_action + noise
         final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
 
-        print(f'Baseline: {baseline_action}, Residual: {corrected_action}, Noisey: {noisy_action}, Final {final_action}')
+        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
 
         return final_action
+    
+    # Used for testing, currently only getting baseline
+    def get_action_from_model(self, state):
+         # Normalize the state
+        normalized_state = self.normalize(state, self.state_mean, self.state_std)
+
+        self.baseline_network.eval()
+        with torch.no_grad():
+            # Convert normalized state to tensor and add a batch dimension
+            state_tensor = torch.tensor(normalized_state, dtype=torch.float32).unsqueeze(0)
+            
+            # Get the action from the policy network
+            action = self.baseline_network(state_tensor)
+            
+            # Convert to numpy array and remove batch dimension
+            action_np = action.numpy().squeeze()
+
+        return action_np
+    
     
     def residual_action(self, state):
         # Assuming state is a numpy array and needs to be unsqueezed to simulate batch dimension
@@ -220,29 +269,28 @@ class Robot:
         return residual_action_np
 
     
-    def add_noise(self, action):
+    def generate_noise(self, action):
         # Convert action to NumPy array if it's a tensor
         if isinstance(action, torch.Tensor):
             action = action.numpy()
         
-        # Determine the scale of the noise based on the episode number
-        noise_scale = 0.2 if self.num_episodes < 6 else 0.05
-        
         # Generate noise
-        noise = np.random.normal(0, noise_scale * constants.ROBOT_MAX_ACTION, size=action.shape)
+        noise = np.random.normal(0, self.current_noise_scale * constants.ROBOT_MAX_ACTION, size=action.shape)
         
-        # Add noise to the action
-        noisy_action = action + noise
-        
-        return noisy_action
-
+        return noise
 
 
     def get_next_action_testing(self, state):
         baseline_action = self.get_action_from_model(state)
-        corrected_action = self.residual_action(baseline_action)
-        noisy_action = self.add_noise(corrected_action)
-        return noisy_action
+        residual_action = self.residual_action(baseline_action)
+        corrected_action = baseline_action + residual_action
+        noise = self.generate_noise(corrected_action)
+        noisy_action = corrected_action + noise
+        final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
+
+        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
+
+        return final_action
 
     # Function that processes a transition
     def process_transition(self, state, action, next_state, money_remaining):
@@ -278,9 +326,10 @@ class Robot:
         reward = -np.linalg.norm(path[-1] - self.goal_state)
         return reward
 
-    def train_policy(self):
-        num_epochs = 100
-        minibatch_size = 100  
+    def normalize(self, data, mean, std):
+        return (data - mean) / std
+
+    def train_policy(self, num_epochs, minibatch_size):
 
         # Convert demonstration data to numpy arrays for easier handling
         state_array = np.array(self.demonstration_states, dtype=np.float32)
@@ -315,29 +364,11 @@ class Robot:
 
             if len(epoch_losses) > 0:
                 avg_loss = np.mean(epoch_losses)
+                self.baseline_losses.append(avg_loss)
                 print(f"Policy Network: Epoch {epoch + 1}, Average Loss: {avg_loss}")
 
         print("Policy Network: Training completed.")
         
-
-    # Used for testing, currently only getting baseline
-    def get_action_from_model(self, state):
-         # Normalize the state
-        normalized_state = self.normalize(state, self.state_mean, self.state_std)
-
-        self.baseline_network.eval()
-        with torch.no_grad():
-            # Convert normalized state to tensor and add a batch dimension
-            state_tensor = torch.tensor(normalized_state, dtype=torch.float32).unsqueeze(0)
-            
-            # Get the action from the policy network
-            action = self.baseline_network(state_tensor)
-            
-            # Convert to numpy array and remove batch dimension
-            action_np = action.numpy().squeeze()
-
-        return action_np
-    
 
     def draw_path(self, path, colour, width):
         path_to_draw = PathToDraw(path, colour=colour, width=width)  
@@ -345,25 +376,31 @@ class Robot:
     
     # DDPG Algorithm
 
-    def ddpg_update(self, batch_size, gamma=0.99, tau=0.001):
-        critic_loss = self.train_critic(self.residual_critic_network, self.target_actor, self.target_critic, self.critic_optimizer, self.memory, batch_size, gamma)
-        
-        actor_loss = self.train_actor(self.residual_actor_network, self.residual_critic_network, self.actor_optimizer, self.memory, batch_size)
+    def ddpg_update(self, num_epochs, batch_size, gamma, tau):
+
+        for epoch in range(num_epochs):
+            critic_loss = self.train_critic(batch_size, gamma)
+            actor_loss = self.train_actor(batch_size)
+            
+            self.actor_losses.append(actor_loss)
+            self.critic_losses.append(critic_loss)
+            
+            # Optionally print the losses
+            print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {critic_loss:.4f}, Actor Loss: {actor_loss:.4f}')
         
         # Soft update the target networks
         self.soft_update(self.target_critic, self.residual_critic_network, tau)
         self.soft_update(self.target_actor, self.residual_actor_network, tau)
-        
-        return critic_loss, actor_loss
 
+        # Call the method to plot losses after each ddpg update
+        self.plot_losses()
 
     def soft_update(self, target, source, tau):
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
 
-
-    def train_critic(self, critic, target_actor, target_critic, optimizer, replay_buffer, batch_size, gamma):
-        states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+    def train_critic(self, batch_size, gamma):
+        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
         
         # Convert to tensors
         states = torch.FloatTensor(states)
@@ -374,43 +411,70 @@ class Robot:
         
         # Compute the target Q value
         with torch.no_grad():
-            next_actions = target_actor(next_states)
-            next_Q_values = target_critic(next_states, next_actions)
+            next_actions = self.target_actor(next_states)
+            next_Q_values = self.target_critic(next_states, next_actions)
             Q_targets = rewards + (gamma * next_Q_values * dones)
         
         # Get current Q estimate
-        current_Q_values = critic(states, actions)
+        current_Q_values = self.residual_critic_network(states, actions)
         
         # Compute critic loss
         critic_loss = self.criterion(current_Q_values, Q_targets)
         
         # Step optimizer
-        optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        optimizer.step()
+        self.critic_optimizer.step()
         
         return critic_loss.item()
 
-    def train_actor(self, actor, critic, optimizer, replay_buffer, batch_size):
-        states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+    def train_actor(self, batch_size):
+        states, _, _, _, _ = self.memory.sample(batch_size)
         states = torch.FloatTensor(states)
         
         # Compute actor loss
-        actions = actor(states)
-        actor_loss = -critic(states, actions).mean()
+        actions = self.residual_actor_network(states)
+        actor_loss = -self.residual_critic_network(states, actions).mean()
         
         # Step optimizer
-        optimizer.zero_grad()
+        self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        optimizer.step()
+        self.actor_optimizer.step()
         
         return actor_loss.item()
     
-    def normalize(self, data, mean, std):
-        return (data - mean) / std
+    def plot_losses(self):
+ 
+        # Plot for baseline losses
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.baseline_losses, label='Baseline Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.title('Baseline Training Losses')
+        plt.savefig('baseline_losses.png')
+        plt.close()  # Close the figure to free memory
 
-    def unnormalize(self, data, mean, std):
-        return (data * std) + mean
+        # Plot for actor losses
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.actor_losses, label='Actor Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.title('Actor Training Losses')
+        plt.savefig('actor_losses.png')
+        plt.close()
+
+        # Plot for critic losses
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.critic_losses, label='Critic Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.yscale('log')  # Set the y-axis to logarithmic scale
+        plt.legend()
+        plt.title('Critic Training Losses')
+        plt.savefig('critic_losses.png')
+        plt.close()
 
 
 
