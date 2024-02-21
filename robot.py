@@ -17,7 +17,7 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 2
+NUM_DEMO = 3
 
 # Residual Actor Critic 
 PATH_LENGTH = 200
@@ -26,8 +26,8 @@ BASELINE_LR = 0.01
 BASELINE_EPOCHS = 100
 BASELINE_BATCH = 100
 
-ACTOR_LR = 0.02
-CRITIC_LR = 0.01
+ACTOR_LR = 0.01
+CRITIC_LR = 0.02
 
 DDPG_EPOCHS = 100
 DDPG_BATCH_SIZE = 100
@@ -44,10 +44,10 @@ STUCK_STEPS = 10
 class Baseline_Policy_Network(nn.Module):
     def __init__(self):
         super(Baseline_Policy_Network, self).__init__()
-        self.layer_1 = nn.Linear(in_features=2, out_features=50)
-        self.layer_2 = nn.Linear(in_features=50, out_features=50)
-        self.layer_3 = nn.Linear(in_features=50, out_features=50)
-        self.output_layer = nn.Linear(in_features=50, out_features=2)
+        self.layer_1 = nn.Linear(in_features=2, out_features=200)
+        self.layer_2 = nn.Linear(in_features=200, out_features=200)
+        self.layer_3 = nn.Linear(in_features=200, out_features=200)
+        self.output_layer = nn.Linear(in_features=200, out_features=2)
 
         # Apply custom weight initialization
         self.apply(self.init_weights)
@@ -71,10 +71,10 @@ class Baseline_Policy_Network(nn.Module):
 class Residual_Actor_Network(nn.Module):
     def __init__(self):
         super(Residual_Actor_Network, self).__init__()
-        self.layer_1 = nn.Linear(in_features=2, out_features=50)
-        self.layer_2 = nn.Linear(in_features=50, out_features=50)
-        self.layer_3 = nn.Linear(in_features=50, out_features=50)
-        self.output_layer = nn.Linear(in_features=50, out_features=2)
+        self.layer_1 = nn.Linear(in_features=2, out_features=200)
+        self.layer_2 = nn.Linear(in_features=200, out_features=200)
+        self.layer_3 = nn.Linear(in_features=200, out_features=200)
+        self.output_layer = nn.Linear(in_features=200, out_features=2)
 
         # Apply custom weight initialization
         self.apply(self.init_weights)
@@ -98,10 +98,10 @@ class Residual_Actor_Network(nn.Module):
 class Residual_Critic_Network(nn.Module):
     def __init__(self):
         super(Residual_Critic_Network, self).__init__()
-        self.layer_1 = nn.Linear(in_features=4, out_features=50)
-        self.layer_2 = nn.Linear(in_features=50, out_features=50)
-        self.layer_3 = nn.Linear(in_features=50, out_features=50)
-        self.output_layer = nn.Linear(in_features=50, out_features=1)
+        self.layer_1 = nn.Linear(in_features=4, out_features=200)
+        self.layer_2 = nn.Linear(in_features=200, out_features=200)
+        self.layer_3 = nn.Linear(in_features=200, out_features=200)
+        self.output_layer = nn.Linear(in_features=200, out_features=1)
 
         # Apply custom weight initialization
         self.apply(self.init_weights)
@@ -202,7 +202,6 @@ class Robot:
     def get_next_action_type(self, state, money_remaining):
         # Initialize action_type with a default value
         action_type = 'step'
-        print(state)
 
         if (self.num_episodes <= NUM_DEMO) and not self.demo_flag:
             self.num_episodes += 1
@@ -217,9 +216,7 @@ class Robot:
         if self.plan_index == (PATH_LENGTH - 1):
             self.plan_index = 0
             self.num_episodes += 1
-            self.demo_flag = False
             self.current_noise_scale *= NOISE_DECAY
-            # self.train_policy(num_epochs = BASELINE_EPOCHS, minibatch_size = BASELINE_BATCH)
             self.ddpg_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
             action_type = 'reset'
 
@@ -229,6 +226,7 @@ class Robot:
         if self.check_if_stuck(state):
             print('Stuck')
             self.plan_index = 0
+            self.ddpg_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
             action_type = 'reset'
 
         # Debugging output
@@ -353,7 +351,7 @@ class Robot:
 
     # Function to calculate the reward for a path, in order to evaluate how good the path is
     def compute_reward(self, path):
-        reward = -np.linalg.norm(path[-1] - self.goal_state)
+        reward = -np.linalg.norm(path[-1] - self.goal_state)**2
         return reward
 
     def normalize(self, data, mean, std):
@@ -481,6 +479,7 @@ class Robot:
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
+        plt.yscale('log')  # Set the y-axis to logarithmic scale
         plt.title('Baseline Training Losses')
         plt.savefig('baseline_losses.png')
         plt.close()  # Close the figure to free memory
@@ -490,6 +489,7 @@ class Robot:
         plt.plot(self.actor_losses, label='Actor Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
+        plt.yscale('log')  # Set the y-axis to logarithmic scale
         plt.legend()
         plt.title('Actor Training Losses')
         plt.savefig('actor_losses.png')
