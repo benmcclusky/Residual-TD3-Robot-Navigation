@@ -17,7 +17,7 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 3
+NUM_DEMO = 4
 
 # Residual Actor Critic 
 PATH_LENGTH = 200
@@ -29,24 +29,28 @@ BASELINE_BATCH = 100
 ACTOR_LR = 0.01
 CRITIC_LR = 0.02
 
+# Need change to TD
 DDPG_EPOCHS = 100
 DDPG_BATCH_SIZE = 100
 GAMMA = 0.99
 TAU = 0.001
 
 INITIAL_NOISE = 0.2  # Initial noise scale
-NOISE_DECAY = 0.5  # Decay rate for noise
+NOISE_DECAY = 0.75  # Decay rate for noise
 
 STUCK_THRESHOLD = 0.2
 STUCK_STEPS = 10
 
 
 class Baseline_Policy_Network(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout_rate=0.5):  # Added a parameter to specify the dropout rate, with a default of 0.5
         super(Baseline_Policy_Network, self).__init__()
         self.layer_1 = nn.Linear(in_features=2, out_features=200)
+        self.dropout_1 = nn.Dropout(dropout_rate)  # Dropout layer after the first layer
         self.layer_2 = nn.Linear(in_features=200, out_features=200)
+        self.dropout_2 = nn.Dropout(dropout_rate)  # Dropout layer after the second layer
         self.layer_3 = nn.Linear(in_features=200, out_features=200)
+        self.dropout_3 = nn.Dropout(dropout_rate)  # Dropout layer after the third layer
         self.output_layer = nn.Linear(in_features=200, out_features=2)
 
         # Apply custom weight initialization
@@ -54,8 +58,11 @@ class Baseline_Policy_Network(nn.Module):
 
     def forward(self, input):
         layer_1_output = nn.functional.relu(self.layer_1(input))
+        layer_1_output = self.dropout_1(layer_1_output)  # Apply dropout after activation
         layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
+        layer_2_output = self.dropout_2(layer_2_output)  # Apply dropout after activation
         layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
+        layer_3_output = self.dropout_3(layer_3_output)  # Apply dropout after activation
         output = self.output_layer(layer_3_output)
         return output
     
@@ -156,7 +163,7 @@ class Robot:
 
         # Behavioural Cloning
         self.baseline_network = Baseline_Policy_Network()
-        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=BASELINE_LR)  # Initial learning rate
+        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=BASELINE_LR)
         self.criterion = nn.MSELoss()
         self.demonstration_states = []
         self.demonstration_actions = []
@@ -166,32 +173,42 @@ class Robot:
         self.current_noise_scale = INITIAL_NOISE
 
         # Replay buffer
-        self.memory = ReplayBuffer(10000)  # Example size
+        self.memory = ReplayBuffer(10000)
 
         # Planning
         self.plan_index = 0
 
         # Normalisation
-        self.state_mean = np.array([50.0, 50.0])  
-        self.state_std = np.array([29, 29]) 
-        self.action_mean = np.array([0.0, 0.0])  
-        self.action_std = np.array([2.5, 2.5])  
+        self.state_mean = np.array([50.0, 50.0])
+        self.state_std = np.array([29, 29])
+        self.action_mean = np.array([0.0, 0.0])
+        self.action_std = np.array([2.5, 2.5])
 
-        # Residual Actor / Critic
+        # TD3 Actor / Critic
         self.residual_actor_network = Residual_Actor_Network()
-        self.residual_critic_network = Residual_Critic_Network()
-        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=ACTOR_LR) 
-        self.critic_optimizer = optim.Adam(self.residual_critic_network.parameters(), lr=CRITIC_LR) 
+        # Initialize twin critic networks and their targets
+        self.residual_critic_network_1 = Residual_Critic_Network()
+        self.residual_critic_network_2 = Residual_Critic_Network()
+        self.target_critic_network_1 = copy.deepcopy(self.residual_critic_network_1)
+        self.target_critic_network_2 = copy.deepcopy(self.residual_critic_network_2)
+        
+        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=ACTOR_LR)
+        self.critic_optimizer_1 = optim.Adam(self.residual_critic_network_1.parameters(), lr=CRITIC_LR)
+        self.critic_optimizer_2 = optim.Adam(self.residual_critic_network_2.parameters(), lr=CRITIC_LR)
 
         self.target_actor = copy.deepcopy(self.residual_actor_network)
-        self.target_critic = copy.deepcopy(self.residual_critic_network)
 
-         # Initialize lists to track losses
+        # TD3 specific hyperparameters
+        self.policy_update_delay = 2  # Delay policy (actor) update frequency
+        self.target_policy_noise = 0.2  # Noise added to target policy
+        self.noise_clip = 0.5  # Clipping value for target policy noise
+        self.max_action = constants.ROBOT_MAX_ACTION  # Maximum action value, adjust as per your environment
+
+        # Initialize lists to track losses
         self.baseline_losses = []
         self.actor_losses = []
         self.critic_losses = []
 
-        # Add these two lines to the __init__ method
         self.previous_states = []  # To track previous states
         self.state_threshold = STUCK_THRESHOLD  # Set a threshold value for state change
         self.state_change_steps = STUCK_STEPS  # The number of steps to check for state change
@@ -217,17 +234,17 @@ class Robot:
             self.plan_index = 0
             self.num_episodes += 1
             self.current_noise_scale *= NOISE_DECAY
-            self.ddpg_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+            self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
             action_type = 'reset'
 
         else:
             self.plan_index += 1 
 
-        if self.check_if_stuck(state):
-            print('Stuck')
-            self.plan_index = 0
-            self.ddpg_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
-            action_type = 'reset'
+        # if self.check_if_stuck(state):
+        #     print('Stuck')
+        #     self.plan_index = 0
+        #     self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+        #     action_type = 'reset'
 
         # Debugging output
         print(f"Action Type: {action_type}, Money Remaining: {money_remaining}, Steps Taken: {self.plan_index}, Episode: {self.num_episodes}")
@@ -351,7 +368,7 @@ class Robot:
 
     # Function to calculate the reward for a path, in order to evaluate how good the path is
     def compute_reward(self, path):
-        reward = -np.linalg.norm(path[-1] - self.goal_state)**2
+        reward = -np.linalg.norm(path[-1] - self.goal_state)
         return reward
 
     def normalize(self, data, mean, std):
@@ -402,74 +419,84 @@ class Robot:
         path_to_draw = PathToDraw(path, colour=colour, width=width)  
         self.paths_to_draw.append(path_to_draw)
     
-    # DDPG Algorithm
-
-    def ddpg_update(self, num_epochs, batch_size, gamma, tau):
-
+    def td3_update(self, num_epochs, batch_size, gamma, tau):
         for epoch in range(num_epochs):
-            critic_loss = self.train_critic(batch_size, gamma)
-            actor_loss = self.train_actor(batch_size)
-            
-            self.actor_losses.append(actor_loss)
-            self.critic_losses.append(critic_loss)
-            
-            # Optionally print the losses
-            print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {critic_loss:.4f}, Actor Loss: {actor_loss:.4f}')
-        
-        # Soft update the target networks
-        self.soft_update(self.target_critic, self.residual_critic_network, tau)
-        self.soft_update(self.target_actor, self.residual_actor_network, tau)
+            critic_loss_1, critic_loss_2 = self.train_critic(batch_size, gamma)
+            # Delayed policy update
+            if epoch % self.policy_update_delay == 0:
+                actor_loss = self.train_actor(batch_size)
+                self.actor_losses.append(actor_loss)
+                # Soft update the target networks
+                self.soft_update(self.target_actor, self.residual_actor_network, tau)
+                self.soft_update(self.target_critic_network_1, self.residual_critic_network_1, tau)
+                self.soft_update(self.target_critic_network_2, self.residual_critic_network_2, tau)
+            else:
+                actor_loss = None  # No actor update this epoch
 
-        # Call the method to plot losses after each ddpg update
+            self.critic_losses.append((critic_loss_1 + critic_loss_2) / 2)  # Average critic loss for tracking
+
+            # Optionally print the losses
+            if actor_loss is not None:
+                print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}, Actor Loss: {actor_loss:.4f}')
+            else:
+                print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}')
+
+        # Call the method to plot losses after each update
         self.plot_losses()
+
 
     def soft_update(self, target, source, tau):
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
 
+    
     def train_critic(self, batch_size, gamma):
         states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
-        
-        # Convert to tensors
+
         states = torch.FloatTensor(states)
         actions = torch.FloatTensor(actions)
         rewards = torch.FloatTensor(rewards).unsqueeze(1)
         next_states = torch.FloatTensor(next_states)
         dones = torch.FloatTensor(1 - dones).unsqueeze(1)  # 1 for not done, 0 for done
-        
-        # Compute the target Q value
+
         with torch.no_grad():
-            next_actions = self.target_actor(next_states)
-            next_Q_values = self.target_critic(next_states, next_actions)
-            Q_targets = rewards + (gamma * next_Q_values * dones)
-        
-        # Get current Q estimate
-        current_Q_values = self.residual_critic_network(states, actions)
-        
-        # Compute critic loss
-        critic_loss = self.criterion(current_Q_values, Q_targets)
-        
-        # Step optimizer
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-        
-        return critic_loss.item()
+            noise = (torch.randn_like(actions) * self.target_policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            next_actions = (self.target_actor(next_states) + noise).clamp(-self.max_action, self.max_action)
+
+            next_Q_values_1 = self.target_critic_network_1(next_states, next_actions)
+            next_Q_values_2 = self.target_critic_network_2(next_states, next_actions)
+            Q_targets = rewards + gamma * torch.min(next_Q_values_1, next_Q_values_2) * dones
+
+        current_Q_values_1 = self.residual_critic_network_1(states, actions)
+        current_Q_values_2 = self.residual_critic_network_2(states, actions)
+
+        critic_loss_1 = self.criterion(current_Q_values_1, Q_targets)
+        critic_loss_2 = self.criterion(current_Q_values_2, Q_targets)
+
+        self.critic_optimizer_1.zero_grad()
+        critic_loss_1.backward()
+        self.critic_optimizer_1.step()
+
+        self.critic_optimizer_2.zero_grad()
+        critic_loss_2.backward()
+        self.critic_optimizer_2.step()
+
+        return critic_loss_1.item(), critic_loss_2.item()
+
 
     def train_actor(self, batch_size):
         states, _, _, _, _ = self.memory.sample(batch_size)
         states = torch.FloatTensor(states)
-        
-        # Compute actor loss
+
         actions = self.residual_actor_network(states)
-        actor_loss = -self.residual_critic_network(states, actions).mean()
-        
-        # Step optimizer
+        actor_loss = -self.residual_critic_network_1(states, actions).mean()
+
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
-        
+
         return actor_loss.item()
+
     
     def plot_losses(self):
  
