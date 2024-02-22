@@ -24,8 +24,8 @@ NUM_DEMO = 2
 PATH_LENGTH = 100
 
 BASELINE_LR = 0.01
-BASELINE_EPOCHS = 100
-BASELINE_BATCH = 100
+BASELINE_EPOCHS = 50
+BASELINE_BATCH = 50
 
 ACTOR_LR = 0.01
 CRITIC_LR = 0.02
@@ -46,13 +46,13 @@ STUCK_STEPS = 10
 class Baseline_Policy_Network(nn.Module):
     def __init__(self, dropout_rate=0.5):  # Added a parameter to specify the dropout rate, with a default of 0.5
         super(Baseline_Policy_Network, self).__init__()
-        self.layer_1 = nn.Linear(in_features=2, out_features=200)
+        self.layer_1 = nn.Linear(in_features=2, out_features=50)
         self.dropout_1 = nn.Dropout(dropout_rate)  # Dropout layer after the first layer
-        self.layer_2 = nn.Linear(in_features=200, out_features=200)
+        self.layer_2 = nn.Linear(in_features=50, out_features=50)
         self.dropout_2 = nn.Dropout(dropout_rate)  # Dropout layer after the second layer
-        self.layer_3 = nn.Linear(in_features=200, out_features=200)
+        self.layer_3 = nn.Linear(in_features=50, out_features=50)
         self.dropout_3 = nn.Dropout(dropout_rate)  # Dropout layer after the third layer
-        self.output_layer = nn.Linear(in_features=200, out_features=2)
+        self.output_layer = nn.Linear(in_features=50, out_features=2)
 
         # Apply custom weight initialization
         self.apply(self.init_weights)
@@ -282,7 +282,7 @@ class Robot:
         self.draw_action(state, baseline_action, [0,0,255])
         self.draw_action(state, residual_action, [255,0,255])
 
-        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
+        # print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
 
         return final_action
     
@@ -338,11 +338,9 @@ class Robot:
         baseline_action = self.get_action_from_model(state)
         residual_action = self.residual_action(baseline_action)
         corrected_action = baseline_action + residual_action
-        noise = self.generate_noise(corrected_action)
-        noisy_action = corrected_action + noise
-        final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
+        final_action = np.clip(corrected_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
 
-        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
+        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Final {final_action}')
 
         return final_action
 
@@ -360,6 +358,8 @@ class Robot:
         self.demonstration_actions.extend(demonstration_actions)
 
         self.draw_path(demonstration_states, [0, 255, 0], 2)
+
+        self.augment_demonstration_data(demonstration_states, demonstration_actions)
 
         for i in range(len(demonstration_states) - 1):  # Assuming sequential data
             state = demonstration_states[i]
@@ -566,6 +566,47 @@ class Robot:
         plt.title('Critic Training Losses')
         plt.savefig('critic_losses.png')
         plt.close()
+
+    def augment_demonstration_data(self, demonstration_states, demonstration_actions, noise_level=2.5, interpolation_steps=5, num_augmentations=3):
+
+        for augmentation in range(num_augmentations):
+            augmented_states = []
+            augmented_actions = []
+
+            # Apply noise and interpolation
+            for i in range(len(demonstration_states) - 1):
+                current_state = demonstration_states[i]
+                next_state = demonstration_states[i + 1]
+                action = demonstration_actions[i]
+
+                for step in range(1, interpolation_steps + 1):
+                    fraction = step / float(interpolation_steps + 1)
+                    synthetic_state = current_state + fraction * (next_state - current_state)
+
+                    noisy_state = synthetic_state + np.random.normal(0, noise_level, synthetic_state.shape)
+                    noisy_action = action + np.random.normal(0, noise_level, action.shape)
+
+                    augmented_states.append(noisy_state)
+                    augmented_actions.append(noisy_action)
+
+                noisy_current_state = current_state + np.random.normal(0, noise_level, current_state.shape)
+                noisy_action = action + np.random.normal(0, noise_level, action.shape)
+
+                augmented_states.append(noisy_current_state)
+                augmented_actions.append(noisy_action)
+
+            # Optionally, add the last state with some noise
+            last_state = demonstration_states[-1] + np.random.normal(0, noise_level, demonstration_states[-1].shape)
+            augmented_states.append(last_state)
+
+            # Repeat the last known action with noise
+            augmented_actions.append(demonstration_actions[-1] + np.random.normal(0, noise_level, demonstration_actions[-1].shape))
+            
+            self.draw_path(np.array(augmented_states), [0, 0, 255], 2)
+
+            self.demonstration_states.extend(augmented_states)
+            self.demonstration_actions.extend(augmented_actions)
+
 
 
 
