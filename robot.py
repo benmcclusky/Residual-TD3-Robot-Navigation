@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+from scipy.spatial import distance
 import copy
 
 # Imports from this project
@@ -17,10 +18,10 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 4
+NUM_DEMO = 2
 
 # Residual Actor Critic 
-PATH_LENGTH = 200
+PATH_LENGTH = 100
 
 BASELINE_LR = 0.01
 BASELINE_EPOCHS = 100
@@ -240,14 +241,13 @@ class Robot:
         else:
             self.plan_index += 1 
 
-        # if self.check_if_stuck(state):
-        #     print('Stuck')
-        #     self.plan_index = 0
-        #     self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
-        #     action_type = 'reset'
+        if self.check_if_stuck(state):
+            self.plan_index = 0
+            self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+            action_type = 'reset'
 
         # Debugging output
-        print(f"Action Type: {action_type}, Money Remaining: {money_remaining}, Steps Taken: {self.plan_index}, Episode: {self.num_episodes}")
+        print(f"Episode: {self.num_episodes} Action: {action_type}, Money: {money_remaining}, Steps: {self.plan_index}")
 
         return action_type
 
@@ -279,6 +279,9 @@ class Robot:
         noisy_action = corrected_action + noise
         final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
 
+        self.draw_action(state, baseline_action, [0,0,255])
+        self.draw_action(state, residual_action, [255,0,255])
+
         print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
 
         return final_action
@@ -300,6 +303,12 @@ class Robot:
             action_np = action.numpy().squeeze()
 
         return action_np
+    
+    def draw_action(self, state, action, colour):
+        expected_state = self.dynamics_model(state, action)
+        path = np.array([state, expected_state])
+        self.draw_path(path, colour, 1)
+        
     
     
     def residual_action(self, state):
@@ -368,7 +377,32 @@ class Robot:
 
     # Function to calculate the reward for a path, in order to evaluate how good the path is
     def compute_reward(self, path):
-        reward = -np.linalg.norm(path[-1] - self.goal_state)
+        # Original reward based on distance to the goal state
+        goal_distance_reward = -np.linalg.norm(path[-1] - self.goal_state)
+
+        # If there are no demonstration states, fallback to original reward
+        if not self.demonstration_states:
+            return goal_distance_reward
+
+        # Convert current state and demonstration states to numpy arrays for distance calculation
+        current_state = np.array([path[-1]])  # Convert last state of the path to 2D array for cdist
+        demonstration_states_np = np.array(self.demonstration_states)
+
+        # Compute distances from current state to all demonstration states
+        distances = distance.cdist(current_state, demonstration_states_np, 'euclidean')
+
+        # Find the minimum distance to a demonstration state
+        min_distance_to_demo = np.min(distances)
+
+        # Secondary objective: Reward for being close to any demonstration state
+        # You might want to normalize or scale this distance to fit your reward scheme
+        demo_proximity_reward = -min_distance_to_demo
+
+        # Combine the two rewards
+        # You can adjust the weighting of goal_distance_reward vs. demo_proximity_reward
+        # depending on their relative importance
+        reward = goal_distance_reward + demo_proximity_reward
+
         return reward
 
     def normalize(self, data, mean, std):
