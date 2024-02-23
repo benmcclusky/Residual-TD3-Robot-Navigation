@@ -21,10 +21,10 @@ from graphics import PathToDraw
 NUM_DEMO = 2
 
 # Residual Actor Critic 
-PATH_LENGTH = 100
+PATH_LENGTH = 50
 
 BASELINE_LR = 0.01
-BASELINE_EPOCHS = 50
+BASELINE_EPOCHS = 10
 BASELINE_BATCH = 50
 
 ACTOR_LR = 0.01
@@ -36,11 +36,37 @@ DDPG_BATCH_SIZE = 100
 GAMMA = 0.99
 TAU = 0.001
 
-INITIAL_NOISE = 0.2  # Initial noise scale
+INITIAL_NOISE = 0.3  # Initial noise scale
 NOISE_DECAY = 0.75  # Decay rate for noise
 
 STUCK_THRESHOLD = 0.2
 STUCK_STEPS = 10
+
+class Dynamics_Network(torch.nn.Module):
+    def __init__(self):
+        super(Dynamics_Network, self).__init__()
+        self.layer_1 = torch.nn.Linear(in_features=4, out_features=50, dtype=torch.float32)
+        self.layer_2 = torch.nn.Linear(in_features=50, out_features=50, dtype=torch.float32)
+        self.layer_3 = torch.nn.Linear(in_features=50, out_features=50, dtype=torch.float32)
+        self.output_layer = torch.nn.Linear(in_features=50, out_features=2, dtype=torch.float32)
+        
+        # Apply custom weight initialization
+        self.apply(self.init_weights)
+
+    def forward(self, input):
+        layer_1_output = torch.nn.functional.relu(self.layer_1(input))
+        layer_2_output = torch.nn.functional.relu(self.layer_2(layer_1_output))
+        layer_3_output = torch.nn.functional.relu(self.layer_3(layer_2_output))
+        output = self.output_layer(layer_3_output)
+        return output
+
+    def init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # He initialization for the weights
+            nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
+            # Zero initialization for the biases
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
 
 class Baseline_Policy_Network(nn.Module):
@@ -214,6 +240,18 @@ class Robot:
         self.state_threshold = STUCK_THRESHOLD  # Set a threshold value for state change
         self.state_change_steps = STUCK_STEPS  # The number of steps to check for state change
 
+        self.dynamics_model_network = Dynamics_Network()
+        self.optimiser = torch.optim.Adam(
+            self.dynamics_model_network.parameters(), lr=0.01)
+        
+        self.state_mean = np.array([50.0, 50.0])  
+        self.state_std = np.array([29, 29]) 
+
+        self.action_mean = np.array([0.0, 0.0])  
+        self.action_std = np.array([2.5, 2.5])  
+
+        self.path_length = PATH_LENGTH
+        self.best_reward = -200
 
 
   
@@ -229,25 +267,28 @@ class Robot:
             self.demo_flag = True
             self.num_episodes += 1
             self.train_policy(num_epochs = BASELINE_EPOCHS, minibatch_size = BASELINE_BATCH)
+            self.train_dynamics()
             action_type = 'reset'
 
-        if self.plan_index == (PATH_LENGTH - 1):
+        if self.plan_index == (self.path_length - 1):
             self.plan_index = 0
             self.num_episodes += 1
             self.current_noise_scale *= NOISE_DECAY
             self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+            self.train_dynamics()
             action_type = 'reset'
 
         else:
             self.plan_index += 1 
 
-        if self.check_if_stuck(state):
-            self.plan_index = 0
-            self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
-            action_type = 'reset'
+        # if self.check_if_stuck(state):
+        #     self.plan_index = 0
+        #     self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+        #     self.train_dynamics()
+        #     action_type = 'reset'
 
         # Debugging output
-        print(f"Episode: {self.num_episodes} Action: {action_type}, Money: {money_remaining}, Steps: {self.plan_index}")
+        print(f"Episode: {self.num_episodes} Action: {action_type}, Money: {money_remaining}, Steps: {self.plan_index}, Best Reward: {self.best_reward}")
 
         return action_type
 
@@ -278,10 +319,6 @@ class Robot:
         noise = self.generate_noise(corrected_action)
         noisy_action = corrected_action + noise
         final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
-
-        self.draw_action(state, baseline_action, [0,0,255])
-        self.draw_action(state, residual_action, [255,0,255])
-
         # print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
 
         return final_action
@@ -347,8 +384,12 @@ class Robot:
     # Function that processes a transition
     def process_transition(self, state, action, next_state, money_remaining):
         reward = self.compute_reward([next_state])
-        done = self.plan_index == (PATH_LENGTH - 1)
+        done = self.plan_index == (self.path_length - 1)
         self.memory.push(state, action, reward, next_state, done)
+
+        if reward > self.best_reward or (self.num_episodes % 2 == 0):
+            self.best_reward = reward
+            self.path_length + 20
 
 
     # Function that takes in the list of states and actions for a demonstration
@@ -357,9 +398,9 @@ class Robot:
         self.demonstration_states.extend(demonstration_states)
         self.demonstration_actions.extend(demonstration_actions)
 
-        self.draw_path(demonstration_states, [0, 255, 0], 2)
-
         self.augment_demonstration_data(demonstration_states, demonstration_actions)
+
+        self.draw_path(demonstration_states, [0, 255, 0], 2)
 
         for i in range(len(demonstration_states) - 1):  # Assuming sequential data
             state = demonstration_states[i]
@@ -371,10 +412,38 @@ class Robot:
 
 
     def dynamics_model(self, state, action):
-        # does nothing
-        return state + action
+        
+        # Convert state and action to PyTorch tensors and ensure correct shape
+        # The input state and action are reshaped to ensure they're in the format PyTorch expects
+        state_tensor = torch.tensor(state, dtype=torch.float32).view(-1)
+        action_tensor = torch.tensor(action, dtype=torch.float32).view(-1)
+
+        # Normalize state and action using PyTorch operations
+        # state_mean and state_std, action_mean and action_std should be 1D tensors or arrays
+        normalized_state = (state_tensor - torch.tensor(self.state_mean, dtype=torch.float32)) / torch.tensor(self.state_std, dtype=torch.float32)
+        normalized_action = (action_tensor - torch.tensor(self.action_mean, dtype=torch.float32)) / torch.tensor(self.action_std, dtype=torch.float32)
+
+        # Combine normalized state and action for the network input
+        combined_input = torch.cat([normalized_state, normalized_action]).unsqueeze(0)  # Adds a batch dimension
+
+        # Ensure the model is in evaluation mode
+        self.dynamics_model_network.eval()
+
+        # Forward pass through the network
+        with torch.no_grad():
+            predicted_next_state_normalized = self.dynamics_model_network(combined_input)
+
+        # Un-normalize the predicted next state using PyTorch operations
+        predicted_next_state = (predicted_next_state_normalized.squeeze() * torch.tensor(self.state_std, dtype=torch.float32)) + torch.tensor(self.state_mean, dtype=torch.float32)
+
+        # Convert the tensor back to a numpy array if necessary
+        predicted_next_state_np = predicted_next_state.numpy().reshape(-1, 1)  # Reshape back to original shape
+
+        return predicted_next_state_np
 
 
+
+    # Function to calculate the reward for a path, in order to evaluate how good the path is
     # Function to calculate the reward for a path, in order to evaluate how good the path is
     def compute_reward(self, path):
         # Original reward based on distance to the goal state
@@ -384,23 +453,24 @@ class Robot:
         if not self.demonstration_states:
             return goal_distance_reward
 
-        # Convert current state and demonstration states to numpy arrays for distance calculation
-        current_state = np.array([path[-1]])  # Convert last state of the path to 2D array for cdist
+        # Convert demonstration states to numpy arrays for distance calculation
         demonstration_states_np = np.array(self.demonstration_states)
+        min_distances = []
 
-        # Compute distances from current state to all demonstration states
-        distances = distance.cdist(current_state, demonstration_states_np, 'euclidean')
+        # Calculate the minimum distance to a demonstration state for each step in the path
+        for step in path:
+            current_state = np.array(step).reshape(1, -1)  # Reshape each step for cdist
+            distances = distance.cdist(current_state, demonstration_states_np, 'euclidean')
+            min_distance_to_demo = np.min(distances)
+            min_distances.append(min_distance_to_demo)
 
-        # Find the minimum distance to a demonstration state
-        min_distance_to_demo = np.min(distances)
+        # Average the minimum distances for the path
+        avg_min_distance = np.mean(min_distances)
 
-        # Secondary objective: Reward for being close to any demonstration state
-        # You might want to normalize or scale this distance to fit your reward scheme
-        demo_proximity_reward = -min_distance_to_demo
+        # Use the average minimum distance as the demo_proximity_reward
+        demo_proximity_reward = -avg_min_distance
 
         # Combine the two rewards
-        # You can adjust the weighting of goal_distance_reward vs. demo_proximity_reward
-        # depending on their relative importance
         reward = goal_distance_reward + demo_proximity_reward
 
         return reward
@@ -608,9 +678,59 @@ class Robot:
             self.demonstration_actions.extend(augmented_actions)
 
 
+    def train_dynamics(self):
+        num_training_epochs = 0
+        training_losses = []
+        num_epochs = 100
+        minibatch_size = 100
+        loss_function = torch.nn.MSELoss()
 
+        # Convert mean and std to tensors for faster computation
+        # Add unsqueeze operation to adjust shapes for broadcasting
+        state_mean_tensor = torch.tensor(self.state_mean, dtype=torch.float32).unsqueeze(0)
+        state_std_tensor = torch.tensor(self.state_std, dtype=torch.float32).unsqueeze(0)
+        action_mean_tensor = torch.tensor(self.action_mean, dtype=torch.float32).unsqueeze(0)
+        action_std_tensor = torch.tensor(self.action_std, dtype=torch.float32).unsqueeze(0)
 
+        for epoch in range(num_epochs):
+            training_epoch_losses = []
 
+            num_training_data = len(self.memory)
+            num_minibatches = max(int(num_training_data / minibatch_size), 1)
 
+            for _ in range(num_minibatches):
+                transitions = self.memory.sample(minibatch_size)
+                if transitions is None:
+                    return
+
+                # Assuming transitions is a tuple of (states, actions, rewards, next_states, dones)
+                states, actions, _, next_states, _ = transitions
+
+                # Convert arrays to PyTorch tensors
+                state_batch_tensor = torch.tensor(states, dtype=torch.float32)
+                action_batch_tensor = torch.tensor(actions, dtype=torch.float32)
+                next_state_batch_tensor = torch.tensor(next_states, dtype=torch.float32)
+
+                state_batch_normalized = (state_batch_tensor - state_mean_tensor) / state_std_tensor
+                action_batch_normalized = (action_batch_tensor - action_mean_tensor) / action_std_tensor
+                next_state_batch_normalized = (next_state_batch_tensor - state_mean_tensor) / state_std_tensor
+
+                combined_input_batch = torch.cat((state_batch_normalized, action_batch_normalized), dim=1)
+
+                self.optimiser.zero_grad()
+
+                predicted_next_state = self.dynamics_model_network(combined_input_batch)
+
+                training_loss = loss_function(predicted_next_state, next_state_batch_normalized)
+                training_loss.backward()
+                self.optimiser.step()
+
+                training_epoch_losses.append(training_loss.item())
+
+            if training_epoch_losses:
+                training_epoch_loss = np.mean(training_epoch_losses)
+                training_losses.append(training_epoch_loss)
+                num_training_epochs += 1
+                print(f'Dynamics Network: Epoch {num_training_epochs}: Training Loss = {training_epoch_loss:.4f}')
 
 
