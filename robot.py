@@ -463,7 +463,7 @@ class Robot:
         goal_distance_reward = -np.linalg.norm(path[-1] - self.goal_state)
 
         if goal_distance_reward >= -constants.TEST_DISTANCE_THRESHOLD:
-            reward = 50
+            reward = 25
             return reward
 
         # If there are no demonstration states, fallback to original reward
@@ -491,7 +491,7 @@ class Robot:
             demo_proximity_reward = 0
 
         # Combine the two rewards
-        reward = goal_distance_reward + (25 * demo_proximity_reward)
+        reward = goal_distance_reward + (10 * demo_proximity_reward)
 
         return reward
 
