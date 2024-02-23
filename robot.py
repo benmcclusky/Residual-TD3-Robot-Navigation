@@ -18,7 +18,7 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 2
+NUM_DEMO = 1
 
 # Residual Actor Critic 
 PATH_LENGTH = 50
@@ -397,7 +397,7 @@ class Robot:
         reward = self.compute_reward([next_state])
 
         if self.check_if_stuck(state):
-            reward = reward - 10
+            reward = reward - 50
 
         done = self.plan_index == (self.path_length - 1)
         self.memory.push(state, action, reward, next_state, done)
@@ -465,7 +465,7 @@ class Robot:
         goal_distance_reward = -np.linalg.norm(path[-1] - self.goal_state)
 
         if goal_distance_reward >= -constants.TEST_DISTANCE_THRESHOLD:
-            reward = 25
+            reward = 50
             return reward
 
         # If there are no demonstration states, fallback to original reward
