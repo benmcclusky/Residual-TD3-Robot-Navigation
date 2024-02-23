@@ -318,7 +318,8 @@ class Robot:
 
 
     def get_next_action_training(self, state, money_remaining):
-        baseline_action = self.get_action_from_model(state)
+        # baseline_action = self.get_action_from_model(state)
+        baseline_action = state - self.goal_state
         residual_action = self.residual_action(baseline_action)
         corrected_action = baseline_action + residual_action
         noise = self.generate_noise(corrected_action)
@@ -378,7 +379,8 @@ class Robot:
 
 
     def get_next_action_testing(self, state):
-        baseline_action = self.get_action_from_model(state)
+        # baseline_action = self.get_action_from_model(state)
+        baseline_action = state - self.goal_state
         residual_action = self.residual_action(baseline_action)
         corrected_action = baseline_action + residual_action
         final_action = np.clip(corrected_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
