@@ -27,8 +27,8 @@ BASELINE_LR = 0.01
 BASELINE_EPOCHS = 10
 BASELINE_BATCH = 50
 
-ACTOR_LR = 0.01
-CRITIC_LR = 0.02
+ACTOR_LR = 0.00001
+CRITIC_LR = 0.00001
 
 # Need change to TD
 DDPG_EPOCHS = 100
@@ -39,7 +39,7 @@ TAU = 0.001
 INITIAL_NOISE = 0.3  # Initial noise scale
 NOISE_DECAY = 0.75  # Decay rate for noise
 
-STUCK_THRESHOLD = 0.2
+STUCK_THRESHOLD = 1
 STUCK_STEPS = 10
 
 class Dynamics_Network(torch.nn.Module):
@@ -276,19 +276,24 @@ class Robot:
             self.current_noise_scale *= NOISE_DECAY
             self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
             self.train_dynamics()
+            self.path_length += 20
             action_type = 'reset'
 
         else:
             self.plan_index += 1 
 
-        # if self.check_if_stuck(state):
-        #     self.plan_index = 0
-        #     self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
-        #     self.train_dynamics()
-        #     action_type = 'reset'
+        if self.check_if_stuck(state):
+            # print('Stuck')
 
-        # Debugging output
-        print(f"Episode: {self.num_episodes} Action: {action_type}, Money: {money_remaining}, Steps: {self.plan_index}, Best Reward: {self.best_reward}")
+            if money_remaining >= constants.COST_PER_RESET:
+                self.plan_index = 0
+                self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+                self.train_dynamics()
+                action_type = 'reset'
+            
+
+        # # Debugging output
+        # print(f"Episode: {self.num_episodes} Action: {action_type}, Money: {money_remaining}, Steps: {self.plan_index}, Best Reward: {self.best_reward}")
 
         return action_type
 
@@ -321,6 +326,7 @@ class Robot:
         final_action = np.clip(noisy_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
         # print(f'Baseline: {baseline_action}, Residual: {residual_action}, Noise: {noise}, Final {final_action}')
 
+        print(f"Reward: {self.compute_reward([state])}")
         return final_action
     
     # Used for testing, currently only getting baseline
@@ -377,19 +383,26 @@ class Robot:
         corrected_action = baseline_action + residual_action
         final_action = np.clip(corrected_action, -constants.ROBOT_MAX_ACTION, constants.ROBOT_MAX_ACTION)
 
-        print(f'Baseline: {baseline_action}, Residual: {residual_action}, Final {final_action}')
+        print(f"Reward: {self.compute_reward([state])}")
+
+        # print(f'Baseline: {baseline_action}, Residual: {residual_action}, Final {final_action}')
 
         return final_action
 
     # Function that processes a transition
     def process_transition(self, state, action, next_state, money_remaining):
+        
         reward = self.compute_reward([next_state])
+
+        if self.check_if_stuck(state):
+            reward = reward - 10
+
         done = self.plan_index == (self.path_length - 1)
         self.memory.push(state, action, reward, next_state, done)
 
-        if reward > self.best_reward or (self.num_episodes % 2 == 0):
+        if reward > self.best_reward:
             self.best_reward = reward
-            self.path_length + 20
+        
 
 
     # Function that takes in the list of states and actions for a demonstration
@@ -449,6 +462,10 @@ class Robot:
         # Original reward based on distance to the goal state
         goal_distance_reward = -np.linalg.norm(path[-1] - self.goal_state)
 
+        if goal_distance_reward >= -constants.TEST_DISTANCE_THRESHOLD:
+            reward = 50
+            return reward
+
         # If there are no demonstration states, fallback to original reward
         if not self.demonstration_states:
             return goal_distance_reward
@@ -470,8 +487,11 @@ class Robot:
         # Use the average minimum distance as the demo_proximity_reward
         demo_proximity_reward = -avg_min_distance
 
+        if not self.demo_flag:
+            demo_proximity_reward = 0
+
         # Combine the two rewards
-        reward = goal_distance_reward + demo_proximity_reward
+        reward = goal_distance_reward + (25 * demo_proximity_reward)
 
         return reward
 
@@ -514,9 +534,9 @@ class Robot:
             if len(epoch_losses) > 0:
                 avg_loss = np.mean(epoch_losses)
                 self.baseline_losses.append(avg_loss)
-                print(f"Policy Network: Epoch {epoch + 1}, Average Loss: {avg_loss}")
+        #         print(f"Policy Network: Epoch {epoch + 1}, Average Loss: {avg_loss}")
 
-        print("Policy Network: Training completed.")
+        # print("Policy Network: Training completed.")
         
 
     def draw_path(self, path, colour, width):
@@ -539,11 +559,11 @@ class Robot:
 
             self.critic_losses.append((critic_loss_1 + critic_loss_2) / 2)  # Average critic loss for tracking
 
-            # Optionally print the losses
-            if actor_loss is not None:
-                print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}, Actor Loss: {actor_loss:.4f}')
-            else:
-                print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}')
+            # # Optionally print the losses
+            # if actor_loss is not None:
+            #     print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}, Actor Loss: {actor_loss:.4f}')
+            # else:
+            #     print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}')
 
         # Call the method to plot losses after each update
         self.plot_losses()
@@ -636,6 +656,8 @@ class Robot:
         plt.title('Critic Training Losses')
         plt.savefig('critic_losses.png')
         plt.close()
+
+        self.plot_critic_values()
 
     def augment_demonstration_data(self, demonstration_states, demonstration_actions, noise_level=2.5, interpolation_steps=5, num_augmentations=3):
 
@@ -730,7 +752,39 @@ class Robot:
             if training_epoch_losses:
                 training_epoch_loss = np.mean(training_epoch_losses)
                 training_losses.append(training_epoch_loss)
-                num_training_epochs += 1
-                print(f'Dynamics Network: Epoch {num_training_epochs}: Training Loss = {training_epoch_loss:.4f}')
+                # num_training_epochs += 1
+                # print(f'Dynamics Network: Epoch {num_training_epochs}: Training Loss = {training_epoch_loss:.4f}')
+
+    def plot_critic_values(self):
+        # Create a 100x100 grid of state values, for each dimension
+        x = np.linspace(0, 100, 100)
+        y = np.linspace(0, 100, 100)
+        X, Y = np.meshgrid(x, y)
+        grid_shape = X.shape
+        
+        # Flatten the grid to iterate over it
+        states = np.vstack([X.ravel(), Y.ravel()]).T
+
+        # Convert states to tensor
+        states_tensor = torch.FloatTensor(states)
+        
+        # Use the actor network to generate actions for each state, if applicable
+        with torch.no_grad():
+            actions = self.residual_actor_network(states_tensor)
+        
+        # Evaluate the critic for each state-action pair
+        critic_values = self.residual_critic_network_1(states_tensor, actions).detach().numpy()
+
+        # Reshape the critic values to match the grid shape
+        Z = critic_values.reshape(grid_shape)
+        
+        # Create a contour plot of critic values
+        plt.figure(figsize=(10, 8))
+        cp = plt.contourf(X, Y, Z, levels=100, cmap='viridis')  # Adjust levels and colormap as needed
+        plt.colorbar(cp)
+        plt.title('Critic Value Function')
+        plt.xlabel('State Dimension 1')
+        plt.ylabel('State Dimension 2')
+        plt.savefig('critic_value_function.png')
 
 
