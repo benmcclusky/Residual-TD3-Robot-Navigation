@@ -23,57 +23,23 @@ NUM_DEMO = 1
 # Residual Actor Critic 
 PATH_LENGTH = 50
 
-BASELINE_LR = 0.01
-BASELINE_EPOCHS = 10
-BASELINE_BATCH = 50
-
-ACTOR_LR = 0.00001
-CRITIC_LR = 0.00001
-
-# Need change to TD
-DDPG_EPOCHS = 100
-DDPG_BATCH_SIZE = 100
-GAMMA = 0.99
-TAU = 0.001
-
 INITIAL_NOISE = 0.3  # Initial noise scale
 NOISE_DECAY = 0.75  # Decay rate for noise
 
 STUCK_THRESHOLD = 1
 STUCK_STEPS = 10
 
+# TD3 specific hyperparameters
+ACTOR_LR = 0.00001
+CRITIC_LR = 0.00001
+POLICY_UPDATE_DELAY = 2 # Delay policy (actor) update frequency
+TARGET_POLICY_NOISE = 0.2 # Noise added to target policy
+NOISE_CLIP = 0.5  # Clipping value for target policy noise
+TD3_EPOCHS = 100
+TD3_BATCH_SIZE = 100
+GAMMA = 0.99
+TAU = 0.001
 
-class Baseline_Policy_Network(nn.Module):
-    def __init__(self, dropout_rate=0.5):  # Added a parameter to specify the dropout rate, with a default of 0.5
-        super(Baseline_Policy_Network, self).__init__()
-        self.layer_1 = nn.Linear(in_features=2, out_features=50)
-        self.dropout_1 = nn.Dropout(dropout_rate)  # Dropout layer after the first layer
-        self.layer_2 = nn.Linear(in_features=50, out_features=50)
-        self.dropout_2 = nn.Dropout(dropout_rate)  # Dropout layer after the second layer
-        self.layer_3 = nn.Linear(in_features=50, out_features=50)
-        self.dropout_3 = nn.Dropout(dropout_rate)  # Dropout layer after the third layer
-        self.output_layer = nn.Linear(in_features=50, out_features=2)
-
-        # Apply custom weight initialization
-        self.apply(self.init_weights)
-
-    def forward(self, input):
-        layer_1_output = nn.functional.relu(self.layer_1(input))
-        layer_1_output = self.dropout_1(layer_1_output)  # Apply dropout after activation
-        layer_2_output = nn.functional.relu(self.layer_2(layer_1_output))
-        layer_2_output = self.dropout_2(layer_2_output)  # Apply dropout after activation
-        layer_3_output = nn.functional.relu(self.layer_3(layer_2_output))
-        layer_3_output = self.dropout_3(layer_3_output)  # Apply dropout after activation
-        output = self.output_layer(layer_3_output)
-        return output
-    
-    def init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            # He initialization for the weights
-            nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
-            # Zero initialization for the biases
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
     
 
 class Residual_Actor_Network(nn.Module):
@@ -157,14 +123,190 @@ class ReplayBuffer:
 
 
 
+class TD3:
+    def __init__(self, actor_network, critic_network_1, critic_network_2, actor_lr=ACTOR_LR, critic_lr=CRITIC_LR, gamma=GAMMA, tau=TAU,
+                 policy_noise=TARGET_POLICY_NOISE, noise_clip=NOISE_CLIP, policy_update_delay=POLICY_UPDATE_DELAY, 
+                 num_epochs = TD3_EPOCHS, batch_size = TD3_BATCH_SIZE ):
+
+        # Actor and Critic networks
+        self.actor_network = actor_network
+        self.critic_network_1 = critic_network_1
+        self.critic_network_2 = critic_network_2
+
+        # Target networks
+        self.target_actor = copy.deepcopy(self.actor_network)
+        self.target_critic_network_1 = copy.deepcopy(self.critic_network_1)
+        self.target_critic_network_2 = copy.deepcopy(self.critic_network_2)
+
+        # Optimizers
+        self.actor_optimizer = optim.Adam(actor_network.parameters(), lr=actor_lr)
+        self.critic_optimizer_1 = optim.Adam(critic_network_1.parameters(), lr=critic_lr)
+        self.critic_optimizer_2 = optim.Adam(critic_network_1.parameters(), lr=critic_lr)
+
+        # Loss Function
+        self.criterion = nn.MSELoss()
+
+        # Hyperparameters
+        self.gamma = gamma
+        self.tau = tau
+        self.policy_noise = policy_noise
+        self.noise_clip = noise_clip
+        self.policy_update_delay = policy_update_delay
+        self.max_action = constants.ROBOT_MAX_ACTION
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+
+        # Tracking losses
+        self.actor_losses = []
+        self.critic_losses = []
+
+    def td3_update(self, replay_buffer):
+
+        for epoch in range(self.num_epochs):
+            critic_loss_1, critic_loss_2 = self.train_critic(self.batch_size, self.gamma, replay_buffer)
+            # Delayed policy update
+            if epoch % self.policy_update_delay == 0:
+                actor_loss = self.train_actor(self.batch_size, replay_buffer)
+                self.actor_losses.append(actor_loss)
+                # Soft update the target networks
+                self.soft_update(self.target_actor, self.actor_network, self.tau)
+                self.soft_update(self.target_critic_network_1, self.critic_network_1, self.tau)
+                self.soft_update(self.target_critic_network_2, self.critic_network_2, self.tau)
+            else:
+                actor_loss = None  # No actor update this epoch
+
+            self.critic_losses.append((critic_loss_1 + critic_loss_2) / 2)  # Average critic loss for tracking
+
+            # Optionally print the losses
+            if actor_loss is not None:
+                print(f'Epoch {epoch + 1}/{self.num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}, Actor Loss: {actor_loss:.4f}')
+            else:
+                print(f'Epoch {epoch + 1}/{self.num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}')
+
+        # Call the method to plot losses after each update
+        self.plot_losses()
+        self.plot_critic_values()
+
+
+    def soft_update(self, target, source, tau):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+
+    
+    def train_critic(self, batch_size, gamma, replay_buffer):
+        states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+
+        states = torch.FloatTensor(states)
+        actions = torch.FloatTensor(actions)
+        rewards = torch.FloatTensor(rewards).unsqueeze(1)
+        next_states = torch.FloatTensor(next_states)
+        dones = torch.FloatTensor(1 - dones).unsqueeze(1)  # 1 for not done, 0 for done
+
+        with torch.no_grad():
+            noise = (torch.randn_like(actions) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            next_actions = (self.target_actor(next_states) + noise).clamp(-self.max_action, self.max_action)
+
+            next_Q_values_1 = self.target_critic_network_1(next_states, next_actions)
+            next_Q_values_2 = self.target_critic_network_2(next_states, next_actions)
+            Q_targets = rewards + gamma * torch.min(next_Q_values_1, next_Q_values_2) * dones
+
+        current_Q_values_1 = self.critic_network_1(states, actions)
+        current_Q_values_2 = self.critic_network_2(states, actions)
+
+        critic_loss_1 = self.criterion(current_Q_values_1, Q_targets)
+        critic_loss_2 = self.criterion(current_Q_values_2, Q_targets)
+
+        self.critic_optimizer_1.zero_grad()
+        critic_loss_1.backward()
+        self.critic_optimizer_1.step()
+
+        self.critic_optimizer_2.zero_grad()
+        critic_loss_2.backward()
+        self.critic_optimizer_2.step()
+
+        return critic_loss_1.item(), critic_loss_2.item()
+
+
+    def train_actor(self, batch_size, replay_buffer):
+        states, _, _, _, _ = replay_buffer.sample(batch_size)
+        states = torch.FloatTensor(states)
+
+        actions = self.actor_network(states)
+        actor_loss = -self.critic_network_1(states, actions).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        return actor_loss.item()
+
+    
+    def plot_losses(self):
+ 
+        # Plot for actor losses
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.actor_losses, label='Actor Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        # plt.yscale('log')  # Set the y-axis to logarithmic scale
+        plt.legend()
+        plt.title('Actor Training Losses')
+        plt.savefig('actor_losses.png')
+        plt.close()
+
+        # Plot for critic losses
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.critic_losses, label='Critic Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        # plt.yscale('log')  # Set the y-axis to logarithmic scale
+        plt.legend()
+        plt.title('Critic Training Losses')
+        plt.savefig('critic_losses.png')
+        plt.close()
+
+    
+    def plot_critic_values(self):
+        # Create a 100x100 grid of state values, for each dimension
+        x = np.linspace(0, 100, 100)
+        y = np.linspace(0, 100, 100)
+        X, Y = np.meshgrid(x, y)
+        grid_shape = X.shape
+        
+        # Flatten the grid to iterate over it
+        states = np.vstack([X.ravel(), Y.ravel()]).T
+
+        # Convert states to tensor
+        states_tensor = torch.FloatTensor(states)
+        
+        # Use the actor network to generate actions for each state, if applicable
+        with torch.no_grad():
+            actions = self.actor_network(states_tensor)
+        
+        # Evaluate the critic for each state-action pair
+        critic_values = self.critic_network_1(states_tensor, actions).detach().numpy()
+
+        # Reshape the critic values to match the grid shape
+        Z = critic_values.reshape(grid_shape)
+        
+        # Create a contour plot of critic values
+        plt.figure(figsize=(10, 8))
+        cp = plt.contourf(X, Y, Z, levels=100, cmap='viridis')  # Adjust levels and colormap as needed
+        plt.colorbar(cp)
+        plt.title('Critic Value Function')
+        plt.xlabel('State Dimension 1')
+        plt.ylabel('State Dimension 2')
+        plt.savefig('critic_value_function.png')
+
+
+
+
+
 class Robot:
     def __init__(self, goal_state):
         self.goal_state = goal_state
         self.paths_to_draw = []
 
-        # Behavioural Cloning
-        self.baseline_network = Baseline_Policy_Network()
-        self.optimizer = optim.Adam(self.baseline_network.parameters(), lr=BASELINE_LR)
         self.criterion = nn.MSELoss()
         self.demonstration_states = []
         self.demonstration_actions = []
@@ -185,25 +327,9 @@ class Robot:
         self.action_mean = np.array([0.0, 0.0])
         self.action_std = np.array([2.5, 2.5])
 
-        # TD3 Actor / Critic
-        self.residual_actor_network = Residual_Actor_Network()
-        # Initialize twin critic networks and their targets
-        self.residual_critic_network_1 = Residual_Critic_Network()
-        self.residual_critic_network_2 = Residual_Critic_Network()
-        self.target_critic_network_1 = copy.deepcopy(self.residual_critic_network_1)
-        self.target_critic_network_2 = copy.deepcopy(self.residual_critic_network_2)
-        
-        self.actor_optimizer = optim.Adam(self.residual_actor_network.parameters(), lr=ACTOR_LR)
-        self.critic_optimizer_1 = optim.Adam(self.residual_critic_network_1.parameters(), lr=CRITIC_LR)
-        self.critic_optimizer_2 = optim.Adam(self.residual_critic_network_2.parameters(), lr=CRITIC_LR)
-
-        self.target_actor = copy.deepcopy(self.residual_actor_network)
-
-        # TD3 specific hyperparameters
-        self.policy_update_delay = 2  # Delay policy (actor) update frequency
-        self.target_policy_noise = 0.2  # Noise added to target policy
-        self.noise_clip = 0.5  # Clipping value for target policy noise
-        self.max_action = constants.ROBOT_MAX_ACTION  # Maximum action value, adjust as per your environment
+        self.td3_agent = TD3(actor_network=Residual_Actor_Network(),
+                critic_network_1=Residual_Critic_Network(),
+                critic_network_2=Residual_Critic_Network(),)
 
         # Initialize lists to track losses
         self.baseline_losses = []
@@ -230,14 +356,14 @@ class Robot:
         if (self.num_episodes > NUM_DEMO) and not self.demo_flag:
             self.demo_flag = True
             self.num_episodes += 1
-            self.train_policy(num_epochs = BASELINE_EPOCHS, minibatch_size = BASELINE_BATCH)
             action_type = 'reset'
 
         if self.plan_index == (self.path_length - 1):
             self.plan_index = 0
             self.num_episodes += 1
             self.current_noise_scale *= NOISE_DECAY
-            self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+            # Update policy via TD3
+            self.td3_agent.td3_update(self.memory)
             self.path_length += 20
             action_type = 'reset'
 
@@ -249,7 +375,8 @@ class Robot:
 
             if money_remaining >= constants.COST_PER_RESET:
                 self.plan_index = 0
-                self.td3_update(num_epochs = DDPG_EPOCHS, batch_size=DDPG_BATCH_SIZE, gamma = GAMMA, tau = TAU)
+                # Update policy via TD3
+                self.td3_agent.td3_update(self.memory)
                 action_type = 'reset'
             
 
@@ -314,9 +441,9 @@ class Robot:
     def residual_action(self, state):
         # Assuming state is a numpy array and needs to be unsqueezed to simulate batch dimension
         state_tensor = torch.FloatTensor(state).unsqueeze(0)  # Add batch dimension
-        self.residual_actor_network.eval()  # Set the network to evaluation mode
+        self.td3_agent.actor_network.eval()  # Set the network to evaluation mode
         with torch.no_grad():  # Ensure no gradients are computed
-            residual_action = self.residual_actor_network(state_tensor)
+            residual_action = self.td3_agent.actor_network(state_tensor)
 
         residual_action_np = residual_action.squeeze(0).numpy()
 
@@ -424,169 +551,11 @@ class Robot:
 
         return reward
 
-    def normalize(self, data, mean, std):
-        return (data - mean) / std
-
-    def train_policy(self, num_epochs, minibatch_size):
-
-        # Convert demonstration data to numpy arrays for easier handling
-        state_array = np.array(self.demonstration_states, dtype=np.float32)
-        action_array = np.array(self.demonstration_actions, dtype=np.float32)
-
-        if len(state_array) < 1:
-            return
-        
-        # Normalize demonstration states and actions
-        state_array_normalized = self.normalize(state_array, self.state_mean, self.state_std)
-        # action_array_normalized = self.normalize(action_array, self.action_mean, self.action_std)
-
-        for epoch in range(num_epochs):
-            epoch_losses = []
-            num_samples = len(state_array_normalized)
-            num_batches = max(num_samples // minibatch_size, 1)
-
-            for batch_idx in range(num_batches):
-                start_idx = batch_idx * minibatch_size
-                end_idx = min((batch_idx + 1) * minibatch_size, num_samples)
-
-                states = torch.tensor(state_array_normalized[start_idx:end_idx], dtype=torch.float32)
-                actions = torch.tensor(action_array[start_idx:end_idx], dtype=torch.float32)
-
-                self.optimizer.zero_grad()
-                outputs = self.baseline_network(states)
-                loss = self.criterion(outputs, actions)
-                loss.backward()
-                self.optimizer.step()
-
-                epoch_losses.append(loss.item())
-
-            if len(epoch_losses) > 0:
-                avg_loss = np.mean(epoch_losses)
-                self.baseline_losses.append(avg_loss)
-        #         print(f"Policy Network: Epoch {epoch + 1}, Average Loss: {avg_loss}")
-
-        # print("Policy Network: Training completed.")
-        
 
     def draw_path(self, path, colour, width):
         path_to_draw = PathToDraw(path, colour=colour, width=width)  
         self.paths_to_draw.append(path_to_draw)
-    
-    def td3_update(self, num_epochs, batch_size, gamma, tau):
-        for epoch in range(num_epochs):
-            critic_loss_1, critic_loss_2 = self.train_critic(batch_size, gamma)
-            # Delayed policy update
-            if epoch % self.policy_update_delay == 0:
-                actor_loss = self.train_actor(batch_size)
-                self.actor_losses.append(actor_loss)
-                # Soft update the target networks
-                self.soft_update(self.target_actor, self.residual_actor_network, tau)
-                self.soft_update(self.target_critic_network_1, self.residual_critic_network_1, tau)
-                self.soft_update(self.target_critic_network_2, self.residual_critic_network_2, tau)
-            else:
-                actor_loss = None  # No actor update this epoch
 
-            self.critic_losses.append((critic_loss_1 + critic_loss_2) / 2)  # Average critic loss for tracking
-
-            # # Optionally print the losses
-            # if actor_loss is not None:
-            #     print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}, Actor Loss: {actor_loss:.4f}')
-            # else:
-            #     print(f'Epoch {epoch + 1}/{num_epochs}, Critic Loss: {(critic_loss_1 + critic_loss_2) / 2:.4f}')
-
-        # Call the method to plot losses after each update
-        self.plot_losses()
-
-
-    def soft_update(self, target, source, tau):
-        for target_param, param in zip(target.parameters(), source.parameters()):
-            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
-
-    
-    def train_critic(self, batch_size, gamma):
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
-
-        states = torch.FloatTensor(states)
-        actions = torch.FloatTensor(actions)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(1 - dones).unsqueeze(1)  # 1 for not done, 0 for done
-
-        with torch.no_grad():
-            noise = (torch.randn_like(actions) * self.target_policy_noise).clamp(-self.noise_clip, self.noise_clip)
-            next_actions = (self.target_actor(next_states) + noise).clamp(-self.max_action, self.max_action)
-
-            next_Q_values_1 = self.target_critic_network_1(next_states, next_actions)
-            next_Q_values_2 = self.target_critic_network_2(next_states, next_actions)
-            Q_targets = rewards + gamma * torch.min(next_Q_values_1, next_Q_values_2) * dones
-
-        current_Q_values_1 = self.residual_critic_network_1(states, actions)
-        current_Q_values_2 = self.residual_critic_network_2(states, actions)
-
-        critic_loss_1 = self.criterion(current_Q_values_1, Q_targets)
-        critic_loss_2 = self.criterion(current_Q_values_2, Q_targets)
-
-        self.critic_optimizer_1.zero_grad()
-        critic_loss_1.backward()
-        self.critic_optimizer_1.step()
-
-        self.critic_optimizer_2.zero_grad()
-        critic_loss_2.backward()
-        self.critic_optimizer_2.step()
-
-        return critic_loss_1.item(), critic_loss_2.item()
-
-
-    def train_actor(self, batch_size):
-        states, _, _, _, _ = self.memory.sample(batch_size)
-        states = torch.FloatTensor(states)
-
-        actions = self.residual_actor_network(states)
-        actor_loss = -self.residual_critic_network_1(states, actions).mean()
-
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
-        return actor_loss.item()
-
-    
-    def plot_losses(self):
- 
-        # Plot for baseline losses
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.baseline_losses, label='Baseline Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.yscale('log')  # Set the y-axis to logarithmic scale
-        plt.title('Baseline Training Losses')
-        plt.savefig('baseline_losses.png')
-        plt.close()  # Close the figure to free memory
-
-        # Plot for actor losses
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.actor_losses, label='Actor Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.yscale('log')  # Set the y-axis to logarithmic scale
-        plt.legend()
-        plt.title('Actor Training Losses')
-        plt.savefig('actor_losses.png')
-        plt.close()
-
-        # Plot for critic losses
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.critic_losses, label='Critic Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.yscale('log')  # Set the y-axis to logarithmic scale
-        plt.legend()
-        plt.title('Critic Training Losses')
-        plt.savefig('critic_losses.png')
-        plt.close()
-
-        self.plot_critic_values()
 
     def augment_demonstration_data(self, demonstration_states, demonstration_actions, noise_level=2.5, interpolation_steps=5, num_augmentations=3):
 
@@ -627,38 +596,3 @@ class Robot:
 
             self.demonstration_states.extend(augmented_states)
             self.demonstration_actions.extend(augmented_actions)
-
-
-    def plot_critic_values(self):
-        # Create a 100x100 grid of state values, for each dimension
-        x = np.linspace(0, 100, 100)
-        y = np.linspace(0, 100, 100)
-        X, Y = np.meshgrid(x, y)
-        grid_shape = X.shape
-        
-        # Flatten the grid to iterate over it
-        states = np.vstack([X.ravel(), Y.ravel()]).T
-
-        # Convert states to tensor
-        states_tensor = torch.FloatTensor(states)
-        
-        # Use the actor network to generate actions for each state, if applicable
-        with torch.no_grad():
-            actions = self.residual_actor_network(states_tensor)
-        
-        # Evaluate the critic for each state-action pair
-        critic_values = self.residual_critic_network_1(states_tensor, actions).detach().numpy()
-
-        # Reshape the critic values to match the grid shape
-        Z = critic_values.reshape(grid_shape)
-        
-        # Create a contour plot of critic values
-        plt.figure(figsize=(10, 8))
-        cp = plt.contourf(X, Y, Z, levels=100, cmap='viridis')  # Adjust levels and colormap as needed
-        plt.colorbar(cp)
-        plt.title('Critic Value Function')
-        plt.xlabel('State Dimension 1')
-        plt.ylabel('State Dimension 2')
-        plt.savefig('critic_value_function.png')
-
-
