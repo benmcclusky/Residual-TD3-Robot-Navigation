@@ -29,14 +29,14 @@ PATH_LENGTH = 50 # Starting Path Length
 PATH_INCREASE = 20 # Increase every episode
 
 # Exploration Noise
-INITIAL_NOISE = 0.3  # Initial noise scale
+INITIAL_NOISE = 1  # Initial noise scale
 NOISE_DECAY = 0.75  # Decay rate for noise
 
 # Replay Buffer
 BUFFER_SIZE = 10000 # Max size of replay buffer
 
 # Reward Shaping
-STUCK_THRESHOLD = 1 # Distance threshold for determining if stuck
+STUCK_THRESHOLD = 2 # Distance threshold for determining if stuck
 STUCK_STEPS = 5 # Review number of steps for determining if stuck
 STUCK_PENALTY = 50 # Reward penalty for being stuck
 GOAL_REWARD = 50 # Reward for reaching goal
