@@ -56,16 +56,7 @@ def run_simulation():
     robot = Robot(environment.goal_state)
     # Create a graphics object, which controls what and where objects should be rendered on the window
     graphics = Graphics(environment)
-    # Create a window on the screen
-    window = graphics.create_window()
-    # Set the current mode
-    mode = 'training'
-    # Keeping track of what has been bought during training
-    demos_bought = 0
-    resets_bought = 0
-    steps_bought = 0
-    # Keeping track of the testing
-    test_init_time = 0
+
     test_best_distance = np.inf
     # Keeping track of if any penalty was applied
     penalty = False
@@ -150,7 +141,7 @@ def run_simulation():
                 print(f'The robot did not reach the goal in time. Best distance: {test_best_distance}.')
                 pyglet.app.exit()
 
-        print(f"Mode: {mode}, Money: {money_remaining}")
+        print(f"Mode: {mode}, Money: {money_remaining}, Action: {action_type}")
 
     
             
