@@ -19,7 +19,7 @@ import configuration
 from graphics import PathToDraw
 
 # Demo
-NUM_DEMO = 1 # Number of demonstrations
+NUM_DEMO = 3 # Number of demonstrations
 NUM_AUGMENTS = 3 # The number of times demonstration data is augmented
 AUG_NOISE = 2.5 # STD for augmentation
 AUG_INTERPOLATION = 5 # Interpolation steps for augmentatioon
@@ -475,11 +475,13 @@ class Robot:
             self.num_episodes += 1
             action_type = 'reset'
 
-        # Reset and update learning policy if at the end of a path, goal reached, or stuck
+
+        # Reset and update policy if  at the end of a path, goal reached, or stuck
         if self.plan_index == (self.path_length - 1) or self.goal_reached or self.stuck_flag:
             self.reset()  # Reset various state flags and adjust for the new episode
             self.td3_agent.td3_update(self.memory)  # Update the agent's policy based on accumulated experience
             action_type = 'reset'
+
         else:
             # Otherwise, simply proceed to the next step in the current path
             self.plan_index += 1
@@ -712,6 +714,8 @@ class Robot:
 
             # Store the transition in memory
             self.memory.push(state, action, reward, next_state, done)
+
+        self.goal_reached = False # Added so demonstrations dont trigger a reset as they have reached the goal
 
 
     # Not used
